@@ -1,0 +1,6 @@
+{
+  "name": "Maa Jagdamba Sthan, Mathurapur",
+  "description": "माँ जगदंबा स्थान, मथुरापुर, मुजफ्फरपुर (बिहार) - आधिकारिक मंदिर पोर्टल, ऑनलाइन सहयोग, रसीद एवं सेवा प्रबंधन।",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
