@@ -23,23 +23,22 @@ export const HeroBanner: React.FC<HeroBannerProps> = ({ config, onNavigate, onOp
             {/* Auspicious Tag */}
             <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-amber-500/20 border border-[#FFD700]/50 text-amber-200 text-xs sm:text-sm font-semibold shadow-sm">
               <Sparkles className="w-4 h-4 text-[#FFD700] animate-spin" style={{ animationDuration: '6s' }} />
-              <span>उत्तर बिहार का प्रसिद्ध जागृत शक्तिपीठ</span>
+              <span>{config.heroBadge || 'उत्तर बिहार का प्रसिद्ध जागृत शक्तिपीठ'}</span>
             </div>
 
             {/* Title */}
             <div className="space-y-2">
               <h1 className="text-3xl sm:text-5xl lg:text-6xl font-extrabold font-heading text-[#FFD700] tracking-wide drop-shadow-md leading-tight">
-                जय माँ जगदंबा
+                {config.heroTitle || 'जय माँ जगदंबा'}
               </h1>
               <div className="text-xl sm:text-2xl lg:text-3xl font-bold text-amber-100 font-heading">
-                मथुरापुर धाम, मुजफ्फरपुर
+                {config.heroSubtitle || 'मथुरापुर धाम, मुजफ्फरपुर'}
               </div>
             </div>
 
             {/* Shloka */}
-            <div className="p-3 sm:p-4 rounded-xl bg-black/30 border-l-4 border-[#ff9933] text-amber-200/90 text-sm sm:text-base italic leading-relaxed font-serif">
-              "सर्वमङ्गलमाङ्गल्ये शिवे सर्वार्थसाधिके ।<br />
-              शरण्ये त्र्यम्बके गौरि नारायणि नमोऽस्तु ते ॥"
+            <div className="p-3 sm:p-4 rounded-xl bg-black/30 border-l-4 border-[#ff9933] text-amber-200/90 text-sm sm:text-base italic leading-relaxed font-serif whitespace-pre-line">
+              {config.heroShloka || '"सर्वमङ्गलमाङ्गल्ये शिवे सर्वार्थसाधिके ।\nशरण्ये त्र्यम्बके गौरि नारायणि नमोऽस्तु ते ॥"'}
             </div>
 
             {/* Aarti Time Card */}
@@ -51,7 +50,7 @@ export const HeroBanner: React.FC<HeroBannerProps> = ({ config, onNavigate, onOp
                 <div>
                   <div className="text-xs text-amber-300 font-medium">प्रातः मंगला आरती</div>
                   <div className="text-base sm:text-lg font-bold text-white tracking-wide font-mono">
-                    05:00 AM
+                    {config.aartiMorning || '05:00 AM'}
                   </div>
                 </div>
               </div>
@@ -63,7 +62,7 @@ export const HeroBanner: React.FC<HeroBannerProps> = ({ config, onNavigate, onOp
                 <div>
                   <div className="text-xs text-amber-300 font-medium">सायं महाआरती</div>
                   <div className="text-base sm:text-lg font-bold text-white tracking-wide font-mono">
-                    07:00 PM
+                    {config.aartiEvening || '07:00 PM'}
                   </div>
                 </div>
               </div>
@@ -105,17 +104,20 @@ export const HeroBanner: React.FC<HeroBannerProps> = ({ config, onNavigate, onOp
 
               <div className="relative rounded-2xl overflow-hidden border-4 border-[#FFD700] bg-stone-900 shadow-2xl">
                 <img
-                  src="https://images.unsplash.com/photo-1598899134739-24c46f58b8c0?auto=format&fit=crop&w=900&q=80"
-                  alt="माँ जगदंबा, मथुरापुर धाम"
+                  src={
+                    config.heroImageUrl ||
+                    'https://images.unsplash.com/photo-1598899134739-24c46f58b8c0?auto=format&fit=crop&w=900&q=80'
+                  }
+                  alt={config.heroTitle || 'माँ जगदंबा, मथुरापुर धाम'}
                   className="w-full h-80 sm:h-96 object-cover object-center group-hover:scale-105 transition-transform duration-700"
                 />
                 {/* Photo Bottom Caption */}
                 <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black via-black/70 to-transparent p-4 text-center">
                   <div className="text-lg font-bold font-heading text-[#FFD700]">
-                    माँ जगदम्बा के पावन दर्शन
+                    {config.heroImageCaption || 'माँ जगदम्बा के पावन दर्शन'}
                   </div>
                   <div className="text-xs text-amber-200/90 font-medium">
-                    प्रतिदिन प्रातः 04:30 बजे से मंदिर कपाट खुलते हैं
+                    {config.heroImageSubCaption || 'प्रतिदिन प्रातः 04:30 बजे से मंदिर कपाट खुलते हैं'}
                   </div>
                 </div>
               </div>

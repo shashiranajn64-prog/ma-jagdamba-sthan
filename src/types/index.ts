@@ -74,7 +74,20 @@ export interface TempleConfig {
   galleryPhotos: GalleryPhoto[];
   googleSheetUrl?: string;
   googleSheetWebhookUrl?: string;
+  googleSheetId?: string;
+  googleSheetTitle?: string;
+  googleSheetLastSyncedAt?: string;
+  googleSheetConnectedAccount?: string;
   autoSyncToSheet?: boolean;
+  // Home Page Customization
+  heroBadge?: string;
+  heroTitle?: string;
+  heroSubtitle?: string;
+  heroShloka?: string;
+  heroImageUrl?: string;
+  heroImageCaption?: string;
+  heroImageSubCaption?: string;
+  dailyQuote?: string;
 }
 
 export interface AdminLog {

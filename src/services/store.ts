@@ -1,5 +1,5 @@
 import { Donation, Staff, Notice, CalendarItem, TempleConfig, AdminLog } from '../types';
-import { syncDonationToGoogleSheet } from './googleSheetSync';
+import { syncDonationToGoogleSheet, triggerAutoSyncIfConnected, formatDonationForSheet } from './googleSheetSync';
 
 // Storage keys
 const STORAGE_KEYS = {
@@ -13,9 +13,9 @@ const STORAGE_KEYS = {
   CURRENT_ADMIN: 'mjs_current_admin',
 };
 
-// TODO: Change to seva@maajagdambasthan.org after buying domain
+// Official Website URL
 export const DEFAULT_EMAIL = 'maajagdambasthan.mathurapur@gmail.com';
-export const WEBSITE_URL = 'https://maa-jagdamba-sthan-mathurapur.web.app';
+export const WEBSITE_URL = 'https://ma-jagdamba-sthan.ai.studio';
 export const CONTACT_PHONE = '+91 9709168876';
 export const TEMPLE_ADDRESS = 'मथुरापुर, मुजफ्फरपुर, बिहार - 843119';
 
@@ -23,7 +23,7 @@ const INITIAL_CONFIG: TempleConfig = {
   upiId: '9709168876@upi',
   qrImageUrl: 'https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=upi://pay?pa=9709168876@upi%26pn=Maa%20Jagdamba%20Sthan%20Trust%26cu=INR',
   phone: CONTACT_PHONE,
-  email: DEFAULT_EMAIL, // TODO: Change to seva@maajagdambasthan.org after buying domain
+  email: DEFAULT_EMAIL,
   website: WEBSITE_URL,
   address: TEMPLE_ADDRESS,
   adminId: '9709168876',
@@ -74,9 +74,28 @@ const INITIAL_CONFIG: TempleConfig = {
   googleSheetUrl: 'https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit',
   googleSheetWebhookUrl: '',
   autoSyncToSheet: true,
+  // Home Page Defaults
+  heroBadge: 'उत्तर बिहार का प्रसिद्ध जागृत शक्तिपीठ',
+  heroTitle: 'जय माँ जगदंबा',
+  heroSubtitle: 'मथुरापुर धाम, मुजफ्फरपुर',
+  heroShloka: 'सर्वमङ्गलमाङ्गल्ये शिवे सर्वार्थसाधिके । शरण्ये त्र्यम्बके गौरि नारायणि नमोऽस्तु ते ॥',
+  heroImageUrl: 'https://images.unsplash.com/photo-1598899134739-24c46f58b8c0?auto=format&fit=crop&w=900&q=80',
+  heroImageCaption: 'माँ जगदम्बा के पावन दर्शन',
+  heroImageSubCaption: 'प्रतिदिन प्रातः 04:30 बजे से मंदिर कपाट खुलते हैं',
+  dailyQuote: 'माँ जगदम्बा की भक्ति से आत्मबल, सुख एवं शांति की प्राप्ति होती है।',
 };
 
 const INITIAL_STAFF: Staff[] = [
+  {
+    id: '9341860040',
+    name: 'प्रेम (Prem)',
+    mobile: '9341860040',
+    role: 'Cash',
+    password: 'mandir123',
+    photoUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=300&q=80',
+    joinDate: '2025-01-15',
+    active: true,
+  },
   {
     id: 'ramesh01',
     name: 'पं. रमेश शर्मा',
@@ -331,15 +350,30 @@ const INITIAL_LOGS: AdminLog[] = [
   }
 ];
 
-// In-memory or localStorage helper
 class TempleStore {
   private listeners: (() => void)[] = [];
+  private broadcastChannel: BroadcastChannel | null = null;
 
   constructor() {
     this.init();
     if (typeof window !== 'undefined') {
-      window.addEventListener('storage', () => {
-        this.notify();
+      try {
+        if ('BroadcastChannel' in window) {
+          this.broadcastChannel = new BroadcastChannel('mjs_temple_live_sync');
+          this.broadcastChannel.onmessage = (event) => {
+            if (event.data?.type === 'STORE_UPDATED') {
+              this.notifyLocal();
+            }
+          };
+        }
+      } catch (err) {
+        console.warn('BroadcastChannel not supported', err);
+      }
+
+      window.addEventListener('storage', (e) => {
+        if (e.key && Object.values(STORAGE_KEYS).includes(e.key)) {
+          this.notifyLocal();
+        }
       });
     }
   }
@@ -364,6 +398,14 @@ class TempleStore {
     }
     if (!localStorage.getItem(STORAGE_KEYS.STAFF)) {
       localStorage.setItem(STORAGE_KEYS.STAFF, JSON.stringify(INITIAL_STAFF));
+    } else {
+      try {
+        const storedStaff = JSON.parse(localStorage.getItem(STORAGE_KEYS.STAFF) || '[]');
+        if (Array.isArray(storedStaff) && !storedStaff.some((s: Staff) => s.id === '9341860040')) {
+          storedStaff.unshift(INITIAL_STAFF[0]);
+          localStorage.setItem(STORAGE_KEYS.STAFF, JSON.stringify(storedStaff));
+        }
+      } catch {}
     }
     if (!localStorage.getItem(STORAGE_KEYS.DONATIONS)) {
       localStorage.setItem(STORAGE_KEYS.DONATIONS, JSON.stringify(INITIAL_DONATIONS));
@@ -386,8 +428,28 @@ class TempleStore {
     };
   }
 
+  private notifyLocal() {
+    this.listeners.forEach((l) => {
+      try {
+        l();
+      } catch (err) {
+        console.error('Error in store listener:', err);
+      }
+    });
+  }
+
   private notify() {
-    this.listeners.forEach((l) => l());
+    this.notifyLocal();
+    if (typeof window !== 'undefined') {
+      try {
+        window.dispatchEvent(
+          new CustomEvent('mjs_store_change', { detail: { timestamp: Date.now() } })
+        );
+        if (this.broadcastChannel) {
+          this.broadcastChannel.postMessage({ type: 'STORE_UPDATED', timestamp: Date.now() });
+        }
+      } catch {}
+    }
   }
 
   // Config
@@ -466,6 +528,7 @@ class TempleStore {
     this.notify();
     try {
       syncDonationToGoogleSheet(newDonation, this.getConfig());
+      triggerAutoSyncIfConnected();
     } catch {}
     return newDonation;
   }
@@ -519,6 +582,7 @@ class TempleStore {
     this.notify();
     try {
       syncDonationToGoogleSheet(updated, this.getConfig());
+      triggerAutoSyncIfConnected();
     } catch {}
     return { donation: updated, whatsappUrl };
   }
@@ -536,6 +600,9 @@ class TempleStore {
     localStorage.setItem(STORAGE_KEYS.DONATIONS, JSON.stringify(all));
     this.logAction('REJECT_DONATION', `दान अस्वीकृत: ID ${id}, नाम: ${all[index].name}, कारण: ${reason || 'अमान्य'}`);
     this.notify();
+    try {
+      triggerAutoSyncIfConnected();
+    } catch {}
   }
 
   public updateDonation(id: string, updates: Partial<Donation>) {
@@ -547,6 +614,9 @@ class TempleStore {
     localStorage.setItem(STORAGE_KEYS.DONATIONS, JSON.stringify(all));
     this.logAction('EDIT_DONATION', `दान विवरण संशोधित: ID ${id}, नाम: ${all[index].name}`);
     this.notify();
+    try {
+      triggerAutoSyncIfConnected();
+    } catch {}
   }
 
   public deleteDonation(id: string, passwordConfirmation: string): boolean {
@@ -562,11 +632,47 @@ class TempleStore {
     const filtered = all.filter((d) => d.id !== id);
     localStorage.setItem(STORAGE_KEYS.DONATIONS, JSON.stringify(filtered));
 
+    // Delete from Google Sheet via Webhook if configured
+    try {
+      const sheetUrl =
+        config.googleSheetWebhookUrl?.trim() ||
+        (config.googleSheetUrl?.includes('script.google.com') ? config.googleSheetUrl.trim() : '');
+
+      if (sheetUrl && sheetUrl.includes('script.google.com')) {
+        const remainingBatch = filtered.map(formatDonationForSheet);
+        fetch(sheetUrl, {
+          method: 'POST',
+          mode: 'no-cors',
+          headers: { 'Content-Type': 'text/plain' },
+          body: JSON.stringify({
+            action: 'delete',
+            receiptNo: toDelete.receiptNo || 'MJS-2026-PENDING',
+            id: toDelete.id,
+            name: toDelete.name,
+            mobile: toDelete.mobile,
+            batch: remainingBatch,
+          }),
+        }).catch((err) => {
+          console.warn('Webhook delete sync error:', err);
+        });
+      }
+    } catch (e) {
+      console.warn('Sheet delete error:', e);
+    }
+
     this.logAction(
       'DELETE_DONATION',
       `हटाया गया दान रिकॉर्ड: ID: ${id}, नाम: ${toDelete.name}, राशि: ₹${toDelete.amount}, रसीद: ${toDelete.receiptNo || 'N/A'}`
     );
     this.notify();
+
+    // Auto-sync deletion to Google Sheet (mirror sync removes deleted row immediately)
+    try {
+      triggerAutoSyncIfConnected();
+    } catch (e) {
+      console.warn('Sheet auto delete sync error:', e);
+    }
+
     return true;
   }
 
@@ -616,6 +722,7 @@ class TempleStore {
     this.notify();
     try {
       syncDonationToGoogleSheet(newDonation, this.getConfig());
+      triggerAutoSyncIfConnected();
     } catch {}
     return { donation: newDonation, receiptLink };
   }
@@ -632,7 +739,18 @@ class TempleStore {
   }
 
   public getStaffById(id: string): Staff | undefined {
-    return this.getStaffList().find((s) => s.id.toLowerCase() === id.toLowerCase());
+    return this.getStaffByIdOrMobile(id);
+  }
+
+  public getStaffByIdOrMobile(identifier: string): Staff | undefined {
+    if (!identifier) return undefined;
+    const clean = identifier.trim().toLowerCase();
+    const cleanDigits = identifier.replace(/\D/g, '');
+    return this.getStaffList().find(
+      (s) =>
+        s.id.toLowerCase() === clean ||
+        (cleanDigits.length >= 10 && s.mobile.replace(/\D/g, '').endsWith(cleanDigits.slice(-10)))
+    );
   }
 
   public addStaff(staffData: {
@@ -855,6 +973,14 @@ class TempleStore {
   public deleteGalleryPhoto(id: string) {
     const config = this.getConfig();
     const updatedPhotos = config.galleryPhotos.filter((p) => p.id !== id);
+    this.updateConfig({ galleryPhotos: updatedPhotos });
+  }
+
+  public updateGalleryPhoto(id: string, updates: Partial<Omit<import('../types').GalleryPhoto, 'id'>>) {
+    const config = this.getConfig();
+    const updatedPhotos = config.galleryPhotos.map((p) =>
+      p.id === id ? { ...p, ...updates } : p
+    );
     this.updateConfig({ galleryPhotos: updatedPhotos });
   }
 

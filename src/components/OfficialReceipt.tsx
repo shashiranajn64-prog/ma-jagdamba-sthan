@@ -8,7 +8,7 @@ import QRCode from 'qrcode';
 const TRUST_EMAIL = 'maajagdambasthan.mathurapur@gmail.com';
 const TRUST_PHONE = '+91 9709168876';
 const TRUST_ADDRESS = 'मथुरापुर, मुजफ्फरपुर, बिहार - 843119';
-const WEBSITE_URL = 'https://maa-jagdamba-sthan-mathurapur.web.app';
+const WEBSITE_URL = 'https://ma-jagdamba-sthan.ai.studio';
 
 interface OfficialReceiptProps {
   donation: Donation;

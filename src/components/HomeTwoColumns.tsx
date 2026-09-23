@@ -58,6 +58,19 @@ export const HomeTwoColumns: React.FC<HomeTwoColumnsProps> = ({
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
+      {/* Daily Sacred Quote Banner if set */}
+      {config.dailyQuote && (
+        <div className="mb-6 p-4 rounded-2xl bg-gradient-to-r from-amber-500/15 via-amber-400/20 to-amber-500/15 border border-amber-300 shadow-xs flex items-center gap-3 text-stone-800">
+          <div className="p-2 rounded-xl bg-[#7a0000] text-[#FFD700] shrink-0 shadow-xs">
+            <Sparkles className="w-4 h-4 text-[#FFD700]" />
+          </div>
+          <div className="text-xs sm:text-sm font-medium">
+            <span className="font-bold text-[#7a0000] mr-1.5 font-heading">॥ आज का पावन सुविचार ॥</span>
+            <span className="italic text-stone-700">"{config.dailyQuote}"</span>
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
         {/* Left Column (70%): lg:col-span-8 */}
         <div className="lg:col-span-8 space-y-8">

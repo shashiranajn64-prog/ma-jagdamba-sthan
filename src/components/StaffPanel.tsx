@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Staff, Donation, Notice } from '../types';
 import { templeStore, WEBSITE_URL } from '../services/store';
 import {
@@ -14,13 +14,17 @@ import {
   CheckCircle2,
   AlertCircle,
   Eye,
+  EyeOff,
   LogOut,
   ArrowLeft,
   Send,
   Sparkles,
+  Camera,
 } from 'lucide-react';
 import { StaffIdCard } from './StaffIdCard';
 import { OfficialReceipt } from './OfficialReceipt';
+import { GalleryManager } from './GalleryManager';
+import { processImageFile } from '../utils/imageUtils';
 
 interface StaffPanelProps {
   currentStaff: Staff;
@@ -33,8 +37,55 @@ export const StaffPanel: React.FC<StaffPanelProps> = ({
   onLogout,
   onViewReceipt,
 }) => {
-  const [activeTab, setActiveTab] = useState<'collection' | 'receipts' | 'addNotice' | 'settings'>('collection');
+  const [activeTab, setActiveTab] = useState<'collection' | 'receipts' | 'addNotice' | 'gallery' | 'settings'>('collection');
+  const [, setTick] = useState(0);
   const [showIdCard, setShowIdCard] = useState(false);
+  const [staffData, setStaffData] = useState<Staff>(
+    () => templeStore.getStaffById(currentStaff.id) || currentStaff
+  );
+  const profileFileInputRef = React.useRef<HTMLInputElement>(null);
+  const [photoSuccessMsg, setPhotoSuccessMsg] = useState('');
+
+  // Subscribe to live store updates across tabs & actions
+  useEffect(() => {
+    const syncStaff = () => {
+      const fresh = templeStore.getStaffById(currentStaff.id);
+      if (fresh) {
+        setStaffData(fresh);
+      }
+      setTick((t) => t + 1);
+    };
+    const unsub = templeStore.subscribe(syncStaff);
+    window.addEventListener('mjs_store_change', syncStaff);
+    return () => {
+      unsub();
+      window.removeEventListener('mjs_store_change', syncStaff);
+    };
+  }, [currentStaff.id]);
+
+  // Handle direct photo upload from device/camera without URL
+  const handleProfilePhotoFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const base64Data = await processImageFile(file, 400, 0.85);
+      templeStore.updateStaff(staffData.id, { photoUrl: base64Data });
+
+      const updated = { ...staffData, photoUrl: base64Data };
+      setStaffData(updated);
+      currentStaff.photoUrl = base64Data;
+
+      setPhotoSuccessMsg('पहचान पत्र एवं प्रोफाइल फोटो सफलतापूर्वक अपडेट हो गई!');
+      setTimeout(() => setPhotoSuccessMsg(''), 4000);
+    } catch (err: any) {
+      alert(err.message || 'फोटो प्रोसेस करने में समस्या आई।');
+    } finally {
+      if (profileFileInputRef.current) {
+        profileFileInputRef.current.value = '';
+      }
+    }
+  };
 
   // New Cash Chanda Form State
   const [bhaktName, setBhaktName] = useState('');
@@ -48,6 +99,9 @@ export const StaffPanel: React.FC<StaffPanelProps> = ({
   // Change Password State
   const [oldPassword, setOldPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
+  const [confirmNewPass, setConfirmNewPass] = useState('');
+  const [showOldPass, setShowOldPass] = useState(false);
+  const [showNewPass, setShowNewPass] = useState(false);
   const [passwordMsg, setPasswordMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Add Notice State
@@ -117,7 +171,10 @@ export const StaffPanel: React.FC<StaffPanelProps> = ({
     e.preventDefault();
     setPasswordMsg(null);
 
-    if (oldPassword !== currentStaff.password) {
+    const freshStaff = templeStore.getStaffById(currentStaff.id);
+    const activeCurrentPass = freshStaff?.password || currentStaff.password;
+
+    if (oldPassword !== activeCurrentPass) {
       setPasswordMsg({ type: 'error', text: 'वर्तमान पासवर्ड गलत है!' });
       return;
     }
@@ -125,11 +182,21 @@ export const StaffPanel: React.FC<StaffPanelProps> = ({
       setPasswordMsg({ type: 'error', text: 'नया पासवर्ड कम से कम 4 अक्षरों का होना चाहिए।' });
       return;
     }
+    if (newPassword !== confirmNewPass) {
+      setPasswordMsg({ type: 'error', text: 'नया पासवर्ड और पुष्टि पासवर्ड मेल नहीं खाते!' });
+      return;
+    }
+    if (newPassword === activeCurrentPass) {
+      setPasswordMsg({ type: 'error', text: 'नया पासवर्ड वर्तमान पासवर्ड से अलग होना चाहिए।' });
+      return;
+    }
 
     templeStore.updateStaff(currentStaff.id, { password: newPassword });
+    currentStaff.password = newPassword;
     setPasswordMsg({ type: 'success', text: 'पासवर्ड सफलतापूर्वक बदल दिया गया है!' });
     setOldPassword('');
     setNewPassword('');
+    setConfirmNewPass('');
   };
 
   // Handle Staff Notice Submission
@@ -155,43 +222,78 @@ export const StaffPanel: React.FC<StaffPanelProps> = ({
 
   return (
     <div className="min-h-screen bg-stone-100/70 py-8 px-4 sm:px-6 lg:px-8">
+      {/* Hidden file input for direct photo upload from camera/gallery */}
+      <input
+        ref={profileFileInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={handleProfilePhotoFileChange}
+      />
+
       <div className="max-w-7xl mx-auto space-y-6">
         {/* Top Staff Header Card */}
         <div className="bg-gradient-to-r from-blue-900 via-blue-800 to-indigo-900 text-white rounded-3xl p-6 shadow-xl border-2 border-blue-400/50 flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-4">
-            <img
-              src={currentStaff.photoUrl}
-              alt={currentStaff.name}
-              className="w-16 h-16 rounded-full object-cover border-2 border-[#FFD700] shadow-md"
-            />
+            {/* Interactive Photo Avatar (Click to upload directly without URL) */}
+            <div
+              onClick={() => profileFileInputRef.current?.click()}
+              className="relative group cursor-pointer shrink-0"
+              title="पहचान पत्र हेतु सीधे फोटो अपलोड करें (बिना URL)"
+            >
+              <img
+                src={
+                  staffData.photoUrl ||
+                  'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=300&q=80'
+                }
+                alt={staffData.name}
+                className="w-16 h-16 rounded-full object-cover border-2 border-[#FFD700] shadow-md ring-2 ring-white/30"
+              />
+              {/* Hover overlay with camera icon */}
+              <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 rounded-full flex flex-col items-center justify-center transition text-[#FFD700]">
+                <Camera className="w-5 h-5" />
+                <span className="text-[8px] font-bold text-white mt-0.5">बदलें</span>
+              </div>
+              {/* Badge Button */}
+              <button
+                type="button"
+                className="absolute -bottom-1 -right-1 p-1 bg-blue-600 hover:bg-blue-700 text-white rounded-full border border-white shadow-md cursor-pointer transition hover:scale-110"
+                title="फोटो अपलोड करें"
+              >
+                <Camera className="w-3 h-3" />
+              </button>
+            </div>
+
             <div>
               <div className="flex items-center gap-2">
                 <h1 className="text-xl sm:text-2xl font-bold font-heading text-white">
-                  {currentStaff.name}
+                  {staffData.name}
                 </h1>
                 <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-[#ff9933] text-stone-950">
-                  {currentStaff.role}
+                  {staffData.role}
                 </span>
               </div>
               <div className="text-xs text-blue-200 mt-1 flex flex-wrap gap-x-3">
-                <span className="font-mono">ID: {currentStaff.id}</span>
+                <span className="font-mono">ID: {staffData.id}</span>
                 <span>•</span>
-                <span>मो: +91 {currentStaff.mobile}</span>
+                <span>मो: +91 {staffData.mobile}</span>
                 <span>•</span>
                 <span>माँ जगदंबा स्थान, मथुरापुर</span>
               </div>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Direct Photo Upload Button */}
             <button
-              onClick={onLogout}
-              className="px-3.5 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-amber-200 hover:text-white text-xs sm:text-sm font-bold border border-amber-400/40 flex items-center gap-1.5 cursor-pointer transition shadow"
-              title="मुख्य पृष्ठ पर वापस जाएं (ऑटो लॉगआउट)"
+              onClick={() => profileFileInputRef.current?.click()}
+              className="px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-stone-950 text-xs sm:text-sm font-bold border border-amber-300 flex items-center gap-1.5 cursor-pointer transition shadow hover:scale-102"
+              title="मोबाइल गैलरी या कैमरा से सीधे फोटो अपलोड करें (बिना URL)"
             >
-              <ArrowLeft className="w-4 h-4" />
-              <span>← वापस (Logout)</span>
+              <Camera className="w-4 h-4 text-stone-950" />
+              <span>📷 फोटो बदलें (Upload Photo)</span>
             </button>
+
             <button
               onClick={() => setShowIdCard(true)}
               className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-[#FFD700] text-xs sm:text-sm font-bold border border-[#FFD700]/60 flex items-center gap-1.5 cursor-pointer transition shadow"
@@ -199,6 +301,7 @@ export const StaffPanel: React.FC<StaffPanelProps> = ({
               <IdCard className="w-4 h-4" />
               <span>ID Card डाउनलोड / देखें</span>
             </button>
+
             <button
               onClick={onLogout}
               className="px-3.5 py-2 rounded-xl bg-red-600/80 hover:bg-red-700 text-white text-xs sm:text-sm font-bold flex items-center gap-1.5 cursor-pointer transition shadow"
@@ -208,6 +311,14 @@ export const StaffPanel: React.FC<StaffPanelProps> = ({
             </button>
           </div>
         </div>
+
+        {/* Photo Upload Success Alert */}
+        {photoSuccessMsg && (
+          <div className="p-3 rounded-2xl bg-emerald-50 border border-emerald-300 text-emerald-800 text-xs sm:text-sm font-bold flex items-center gap-2 animate-in fade-in">
+            <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+            <span>{photoSuccessMsg}</span>
+          </div>
+        )}
 
         {/* Dashboard 2 Stats Boxes for Staff */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -309,6 +420,18 @@ export const StaffPanel: React.FC<StaffPanelProps> = ({
           >
             <FilePlus className="w-4 h-4" />
             <span>सूचना भेजें (Notice)</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('gallery')}
+            className={`py-3.5 px-4 font-bold text-xs sm:text-sm border-b-2 whitespace-nowrap cursor-pointer transition flex items-center gap-2 ${
+              activeTab === 'gallery'
+                ? 'border-blue-600 text-blue-700'
+                : 'border-transparent text-stone-600 hover:text-stone-900'
+            }`}
+          >
+            <Camera className="w-4 h-4" />
+            <span>फोटो गैलरी (Photo Gallery)</span>
           </button>
 
           <button
@@ -601,7 +724,16 @@ export const StaffPanel: React.FC<StaffPanelProps> = ({
           </div>
         )}
 
-        {/* TAB 4: CHANGE OWN PASSWORD */}
+        {/* TAB 4: PHOTO GALLERY MANAGER (STAFF) */}
+        {activeTab === 'gallery' && (
+          <GalleryManager
+            role="staff"
+            staffName={currentStaff.name}
+            onRefresh={() => setTick((t) => t + 1)}
+          />
+        )}
+
+        {/* TAB 5: CHANGE OWN PASSWORD */}
         {activeTab === 'settings' && (
           <div className="bg-white rounded-3xl p-6 sm:p-8 shadow-md border border-stone-200 max-w-md mx-auto space-y-5">
             <div>
@@ -635,33 +767,65 @@ export const StaffPanel: React.FC<StaffPanelProps> = ({
                 <label className="block text-xs font-bold uppercase tracking-wider text-stone-700 mb-1.5">
                   वर्तमान पासवर्ड (Old Password) <span className="text-red-600">*</span>
                 </label>
-                <input
-                  type="password"
-                  required
-                  placeholder="वर्तमान पासवर्ड"
-                  value={oldPassword}
-                  onChange={(e) => setOldPassword(e.target.value)}
-                  className="w-full px-4 py-2.5 rounded-xl border border-stone-300 text-sm outline-hidden focus:ring-2 focus:ring-blue-600 font-mono"
-                />
+                <div className="relative">
+                  <input
+                    type={showOldPass ? 'text' : 'password'}
+                    required
+                    placeholder="वर्तमान पासवर्ड दर्ज करें"
+                    value={oldPassword}
+                    onChange={(e) => setOldPassword(e.target.value)}
+                    className="w-full px-4 pr-10 py-2.5 rounded-xl border border-stone-300 text-sm outline-hidden focus:ring-2 focus:ring-blue-600 font-mono"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowOldPass(!showOldPass)}
+                    className="absolute right-3 top-3 text-stone-400 hover:text-stone-700 cursor-pointer"
+                  >
+                    {showOldPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
               </div>
 
               <div>
                 <label className="block text-xs font-bold uppercase tracking-wider text-stone-700 mb-1.5">
                   नया पासवर्ड (New Password) <span className="text-red-600">*</span>
                 </label>
+                <div className="relative">
+                  <input
+                    type={showNewPass ? 'text' : 'password'}
+                    required
+                    placeholder="कम से कम 4 अक्षर का नया पासवर्ड"
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    className="w-full px-4 pr-10 py-2.5 rounded-xl border border-stone-300 text-sm outline-hidden focus:ring-2 focus:ring-blue-600 font-mono"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowNewPass(!showNewPass)}
+                    className="absolute right-3 top-3 text-stone-400 hover:text-stone-700 cursor-pointer"
+                  >
+                    {showNewPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold uppercase tracking-wider text-stone-700 mb-1.5">
+                  नए पासवर्ड की पुष्टि करें (Confirm New Password) <span className="text-red-600">*</span>
+                </label>
                 <input
                   type="password"
                   required
-                  placeholder="कम से कम 4 अक्षर"
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
+                  placeholder="नया पासवर्ड दोबारा दर्ज करें"
+                  value={confirmNewPass}
+                  onChange={(e) => setConfirmNewPass(e.target.value)}
                   className="w-full px-4 py-2.5 rounded-xl border border-stone-300 text-sm outline-hidden focus:ring-2 focus:ring-blue-600 font-mono"
                 />
               </div>
 
               <button
                 type="submit"
-                className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm shadow cursor-pointer transition flex items-center justify-center gap-2"
+                className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm shadow cursor-pointer transition flex items-center justify-center gap-2 active:scale-98"
               >
                 <KeyRound className="w-4 h-4" />
                 <span>पासवर्ड अपडेट करें</span>
@@ -673,7 +837,15 @@ export const StaffPanel: React.FC<StaffPanelProps> = ({
 
       {/* ID Card Modal */}
       {showIdCard && (
-        <StaffIdCard staff={currentStaff} onClose={() => setShowIdCard(false)} />
+        <StaffIdCard
+          staff={staffData}
+          onClose={() => setShowIdCard(false)}
+          onUpdateStaff={(updated) => {
+            setStaffData(updated);
+            currentStaff.photoUrl = updated.photoUrl;
+            setTick((t) => t + 1);
+          }}
+        />
       )}
     </div>
   );

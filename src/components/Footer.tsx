@@ -7,7 +7,7 @@ import { MapPin, Phone, Mail, Globe, HeartHandshake, Shield, Users, Clock, Exter
 const TRUST_EMAIL = 'maajagdambasthan.mathurapur@gmail.com';
 const TRUST_PHONE = '+91 9709168876';
 const TRUST_ADDRESS = 'मथुरापुर, मुजफ्फरपुर, बिहार - 843119';
-const WEBSITE_URL = 'https://maa-jagdamba-sthan-mathurapur.web.app';
+const WEBSITE_URL = 'https://ma-jagdamba-sthan.ai.studio';
 
 interface FooterProps {
   config: TempleConfig;
@@ -208,7 +208,7 @@ export const Footer: React.FC<FooterProps> = ({
             © 2026 माँ जगदंबा स्थान न्यास समिति, मथुरापुर (मुजफ्फरपुर), बिहार। सर्वाधिकार सुरक्षित।
           </p>
           <p className="text-[11px] text-stone-500">
-            होस्टेड ऑन: <span className="font-mono text-amber-300">https://maa-jagdamba-sthan-mathurapur.web.app</span>
+            होस्टेड ऑन: <span className="font-mono text-amber-300">https://ma-jagdamba-sthan.ai.studio</span>
           </p>
         </div>
       </div>

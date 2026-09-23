@@ -1,11 +1,22 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
+import { User } from 'firebase/auth';
 import { Donation, Staff, Notice, CalendarItem, TempleConfig } from '../types';
 import { templeStore } from '../services/store';
+import { processImageFile } from '../utils/imageUtils';
+import {
+  signInWithGoogle,
+  initGoogleAuth,
+  getCachedAccessToken,
+  logoutGoogle,
+} from '../services/googleAuth';
 import {
   exportDonationsToExcel,
   syncDonationToGoogleSheet,
   syncAllDonationsToGoogleSheet,
   GOOGLE_APPS_SCRIPT_TEMPLATE,
+  mirrorSyncDonationsToSheet,
+  createDonationSpreadsheet,
+  extractSpreadsheetId,
 } from '../services/googleSheetSync';
 import {
   Shield,
@@ -39,8 +50,15 @@ import {
   Copy,
   Check,
   RefreshCw,
+  Camera,
+  Flame,
+  Clock,
+  Upload,
+  X,
 } from 'lucide-react';
 import { MandirSeal } from './TempleIcons';
+import { StaffIdCard } from './StaffIdCard';
+import { GalleryManager } from './GalleryManager';
 
 interface AdminPanelProps {
   onLogout: () => void;
@@ -49,12 +67,23 @@ interface AdminPanelProps {
 
 export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt }) => {
   const [activeMenu, setActiveMenu] = useState<
-    'dashboard' | 'online' | 'staff' | 'cash' | 'qr' | 'notices' | 'content' | 'sheet'
+    'dashboard' | 'online' | 'staff' | 'cash' | 'qr' | 'notices' | 'content' | 'gallery' | 'sheet'
   >('dashboard');
 
   // Re-fetch trigger state
   const [, setTick] = useState(0);
   const rerender = () => setTick((t) => t + 1);
+
+  // Subscribe to store changes so Admin Panel updates live instantly
+  useEffect(() => {
+    const sync = () => rerender();
+    const unsub = templeStore.subscribe(sync);
+    window.addEventListener('mjs_store_change', sync);
+    return () => {
+      unsub();
+      window.removeEventListener('mjs_store_change', sync);
+    };
+  }, []);
 
   // Core Data
   const donations = templeStore.getDonations();
@@ -71,7 +100,22 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
   const [googleSheetWebhookInput, setGoogleSheetWebhookInput] = useState(config.googleSheetWebhookUrl || '');
   const [isSyncingSheet, setIsSyncingSheet] = useState(false);
   const [syncToastMessage, setSyncToastMessage] = useState<string | null>(null);
+  const [downloadBlobUrl, setDownloadBlobUrl] = useState<{ url: string; name: string } | null>(null);
   const [copiedScript, setCopiedScript] = useState(false);
+  const [googleUser, setGoogleUser] = useState<User | null>(null);
+  const [isGoogleSigningIn, setIsGoogleSigningIn] = useState(false);
+  const [isCreatingSheet, setIsCreatingSheet] = useState(false);
+
+  // Initialize Google Auth state listener
+  useEffect(() => {
+    const unsub = initGoogleAuth(
+      (user) => setGoogleUser(user),
+      () => setGoogleUser(null)
+    );
+    return () => {
+      if (typeof unsub === 'function') unsub();
+    };
+  }, []);
 
   // Handlers for Google Sheet & Excel
   const handleOpenGoogleSheet = () => {
@@ -93,26 +137,155 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
       return;
     }
     try {
-      exportDonationsToExcel(dataToExport);
+      const res = exportDonationsToExcel(dataToExport, label);
+      if (res.blobUrl) {
+        setDownloadBlobUrl({ url: res.blobUrl, name: res.fileName });
+      }
       setSyncToastMessage(`✅ ${label} ${dataToExport.length} दान का Excel (.xlsx) सफलतापूर्वक डाउनलोड हो गया!`);
-      setTimeout(() => setSyncToastMessage(null), 4000);
-    } catch (e) {
-      alert('Excel डाउनलोड करने में त्रुटि आई। कृपया पुनः प्रयास करें।');
+      setTimeout(() => setSyncToastMessage(null), 10000);
+    } catch (e: any) {
+      console.error('Download error:', e);
+      alert(e.message || 'Excel डाउनलोड करने में त्रुटि आई। कृपया पुनः प्रयास करें।');
     }
   };
 
-  const handleConnectSheet = () => {
-    if (!googleSheetInput.trim().startsWith('http')) {
-      alert('कृपया वैध Google Sheet URL दर्ज करें (जैसे: https://docs.google.com/spreadsheets/d/...)');
+  const handleGoogleSignIn = async () => {
+    try {
+      setIsGoogleSigningIn(true);
+      const { user, accessToken } = await signInWithGoogle();
+      setGoogleUser(user);
+      templeStore.updateConfig({
+        googleSheetConnectedAccount: user.email || user.displayName || 'Google Account',
+      });
+
+      const currentConfig = templeStore.getConfig();
+      const sheetId = currentConfig.googleSheetId || extractSpreadsheetId(currentConfig.googleSheetUrl || googleSheetInput);
+      if (sheetId) {
+        await mirrorSyncDonationsToSheet(accessToken, sheetId, donations);
+        setSyncToastMessage(`⚡ Google खाता (${user.email}) कनेक्ट हुआ! समस्त ${donations.length} दान Google Sheet में तुरंत सिंक हो गए हैं।`);
+      } else {
+        setSyncToastMessage(`✅ Google खाता (${user.email}) सफलतापूर्वक कनेक्ट हो गया! अब "नई Sheet बनाएँ" पर क्लिक करें।`);
+      }
+      setTimeout(() => setSyncToastMessage(null), 5000);
+      rerender();
+    } catch (err: any) {
+      console.error('Google Sign-in error:', err);
+      alert(err.message || 'Google साइन-इन विफल रहा।');
+    } finally {
+      setIsGoogleSigningIn(false);
+    }
+  };
+
+  const handleGoogleSignOut = async () => {
+    await logoutGoogle();
+    setGoogleUser(null);
+    setSyncToastMessage('Google खाते से साइन-आउट कर दिया गया।');
+    setTimeout(() => setSyncToastMessage(null), 3000);
+  };
+
+  const handleCreateNewSheet = async () => {
+    const token = getCachedAccessToken();
+    if (!token) {
+      alert('कृपया पहले "Sign in with Google" बटन पर क्लिक करके अपना Google खाता कनेक्ट करें।');
       return;
     }
+
+    try {
+      setIsCreatingSheet(true);
+      const newSheet = await createDonationSpreadsheet(
+        token,
+        'माँ जगदम्बा स्थान, मथुरापुर - दान रसीद पंजी (MJS Donations Register)'
+      );
+      templeStore.updateConfig({
+        googleSheetId: newSheet.id,
+        googleSheetUrl: newSheet.url,
+        googleSheetTitle: newSheet.title,
+      });
+      setGoogleSheetInput(newSheet.url);
+
+      // Perform immediate mirror sync
+      await mirrorSyncDonationsToSheet(token, newSheet.id, donations);
+
+      setSyncToastMessage(`🎉 बधाई! आपके Google Drive में नई Google Sheet बन गई एवं सभी ${donations.length} दान तुरंत सिंक हो गए!`);
+      setTimeout(() => setSyncToastMessage(null), 6000);
+      rerender();
+    } catch (err: any) {
+      alert(err.message || 'नई शीट बनाने में त्रुटि आई।');
+    } finally {
+      setIsCreatingSheet(false);
+    }
+  };
+
+  const handleMirrorSyncNow = async () => {
+    const token = getCachedAccessToken();
+    const currentConfig = templeStore.getConfig();
+    const sheetId = currentConfig.googleSheetId || extractSpreadsheetId(googleSheetInput);
+
+    if (!sheetId) {
+      alert('कृपया पहले Google Sheet URL या ID दर्ज करें।');
+      return;
+    }
+
+    if (!token) {
+      if (currentConfig.googleSheetWebhookUrl) {
+        handleSyncAllToSheet();
+        return;
+      }
+      alert('सीधे Google Sheet में सिंक करने के लिए कृपया पहले "Sign in with Google" से लॉगिन करें।');
+      return;
+    }
+
+    setIsSyncingSheet(true);
+    try {
+      const res = await mirrorSyncDonationsToSheet(token, sheetId, donations);
+      setSyncToastMessage(`⚡ ${res.message} (मिरर सिंक: जो दान लिस्ट में है, वही शीट में रहेगा)`);
+      rerender();
+    } catch (err: any) {
+      setSyncToastMessage(`⚠️ सिंक त्रुटि: ${err.message}`);
+    } finally {
+      setIsSyncingSheet(false);
+      setTimeout(() => setSyncToastMessage(null), 5000);
+    }
+  };
+
+  const handleConnectSheet = async () => {
+    const rawInput = googleSheetInput.trim();
+    if (!rawInput.startsWith('http')) {
+      alert('कृपया वैध Google Sheet URL या Apps Script Webhook URL दर्ज करें');
+      return;
+    }
+
+    const isWebhook = rawInput.includes('script.google.com') || rawInput.includes('sheetdb.io');
+    const sheetId = isWebhook ? '' : extractSpreadsheetId(rawInput);
+    const webhookUrl = isWebhook ? rawInput : (googleSheetWebhookInput.trim() || undefined);
+
     templeStore.updateConfig({
-      googleSheetUrl: googleSheetInput.trim(),
-      googleSheetWebhookUrl: googleSheetWebhookInput.trim(),
+      googleSheetUrl: rawInput,
+      googleSheetId: sheetId,
+      googleSheetWebhookUrl: webhookUrl,
     });
+
+    const token = getCachedAccessToken();
+    if (token && sheetId) {
+      try {
+        await mirrorSyncDonationsToSheet(token, sheetId, donations);
+        setSyncToastMessage('✅ Google Sheet सफलतापूर्वक लिंक हो गई एवं सभी दान लाइव सिंक हो गए!');
+      } catch (err: any) {
+        setSyncToastMessage(`✅ लिंक सहेज लिया गया। (सिंक: ${err.message})`);
+      }
+    } else if (webhookUrl) {
+      try {
+        await syncAllDonationsToGoogleSheet(donations);
+        setSyncToastMessage('⚡ Google Sheet Webhook लिंक हो गया एवं सभी दान तुरंत सिंक हो गए!');
+      } catch {
+        setSyncToastMessage('✅ Google Sheet Webhook लिंक सहेज लिया गया!');
+      }
+    } else {
+      setSyncToastMessage('✅ Google Sheet लिंक सहेज लिया गया!');
+    }
+
     rerender();
-    setSyncToastMessage('✅ Google Sheet सफलतापूर्वक कनेक्ट हो गई! लाइव सिंक सक्रिय है।');
-    setTimeout(() => setSyncToastMessage(null), 4000);
+    setTimeout(() => setSyncToastMessage(null), 5000);
   };
 
   const handleSyncAllToSheet = async () => {
@@ -156,6 +329,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
   // Staff Modal States
   const [editingStaff, setEditingStaff] = useState<Staff | null>(null);
   const [staffDetailView, setStaffDetailView] = useState<Staff | null>(null);
+  const [staffIdCardView, setStaffIdCardView] = useState<Staff | null>(null);
   const [showStaffPasswordId, setShowStaffPasswordId] = useState<Record<string, boolean>>({});
 
   // Add Staff Form State
@@ -163,22 +337,112 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
   const [newStaffMobile, setNewStaffMobile] = useState('');
   const [newStaffRole, setNewStaffRole] = useState<'Pujari' | 'Cash' | 'Volunteer'>('Pujari');
   const [newStaffId, setNewStaffId] = useState('');
-  const [newStaffPassword, setNewStaffPassword] = useState('mandir123');
+  const [newStaffPassword, setNewStaffPassword] = useState('');
   const [newStaffPhoto, setNewStaffPhoto] = useState('');
+  const [isUploadingNewStaffPhoto, setIsUploadingNewStaffPhoto] = useState(false);
+  const newStaffFileInputRef = useRef<HTMLInputElement>(null);
+  const editStaffFileInputRef = useRef<HTMLInputElement>(null);
   const [showNewStaffPass, setShowNewStaffPass] = useState(false);
   const [staffFormError, setStaffFormError] = useState('');
   const [staffFormSuccess, setStaffFormSuccess] = useState('');
+
+  // Handle direct photo selection for new staff without URL
+  const handleNewStaffPhotoSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setIsUploadingNewStaffPhoto(true);
+    try {
+      const base64 = await processImageFile(file, 400, 0.85);
+      setNewStaffPhoto(base64);
+    } catch (err: any) {
+      alert(err.message || 'फोटो प्रोसेस करने में समस्या आई।');
+    } finally {
+      setIsUploadingNewStaffPhoto(false);
+      if (newStaffFileInputRef.current) newStaffFileInputRef.current.value = '';
+    }
+  };
+
+  // Handle direct photo selection for editing staff without URL
+  const handleEditStaffPhotoSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !editingStaff) return;
+    try {
+      const base64 = await processImageFile(file, 400, 0.85);
+      setEditingStaff({ ...editingStaff, photoUrl: base64 });
+    } catch (err: any) {
+      alert(err.message || 'फोटो प्रोसेस करने में समस्या आई।');
+    } finally {
+      if (editStaffFileInputRef.current) editStaffFileInputRef.current.value = '';
+    }
+  };
 
   // QR Settings State
   const [qrUpiId, setQrUpiId] = useState(config.upiId);
   const [qrImageUrl, setQrImageUrl] = useState(config.qrImageUrl);
   const [qrSuccessMsg, setQrSuccessMsg] = useState('');
+  const qrFileInputRef = useRef<HTMLInputElement>(null);
+  const [isUploadingQrPhoto, setIsUploadingQrPhoto] = useState(false);
+
+  // Handle direct QR photo selection without URL
+  const handleQrPhotoSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      setIsUploadingQrPhoto(true);
+      const base64 = await processImageFile(file, 600, 0.9);
+      setQrImageUrl(base64);
+    } catch (err: any) {
+      alert(err.message || 'QR फोटो प्रोसेस करने में समस्या आई।');
+    } finally {
+      setIsUploadingQrPhoto(false);
+      if (qrFileInputRef.current) qrFileInputRef.current.value = '';
+    }
+  };
 
   // Add Notice Form State
   const [noticeTitle, setNoticeTitle] = useState('');
   const [noticeDetails, setNoticeDetails] = useState('');
   const [noticeDate, setNoticeDate] = useState(new Date().toISOString().split('T')[0]);
   const [editingNotice, setEditingNotice] = useState<Notice | null>(null);
+
+  // Home Page Settings State
+  const [heroBadge, setHeroBadge] = useState(config.heroBadge || 'उत्तर बिहार का प्रसिद्ध जागृत शक्तिपीठ');
+  const [heroTitle, setHeroTitle] = useState(config.heroTitle || 'जय माँ जगदंबा');
+  const [heroSubtitle, setHeroSubtitle] = useState(config.heroSubtitle || 'मथुरापुर धाम, मुजफ्फरपुर');
+  const [heroShloka, setHeroShloka] = useState(
+    config.heroShloka || '"सर्वमङ्गलमाङ्गल्ये शिवे सर्वार्थसाधिके ।\nशरण्ये त्र्यम्बके गौरि नारायणि नमोऽस्तु ते ॥"'
+  );
+  const [heroImageUrl, setHeroImageUrl] = useState(
+    config.heroImageUrl || 'https://images.unsplash.com/photo-1598899134739-24c46f58b8c0?auto=format&fit=crop&w=900&q=80'
+  );
+  const [heroImageCaption, setHeroImageCaption] = useState(config.heroImageCaption || 'माँ जगदम्बा के पावन दर्शन');
+  const [heroImageSubCaption, setHeroImageSubCaption] = useState(
+    config.heroImageSubCaption || 'प्रतिदिन प्रातः 04:30 बजे से मंदिर कपाट खुलते हैं'
+  );
+  const heroFileInputRef = useRef<HTMLInputElement>(null);
+  const [isUploadingHeroPhoto, setIsUploadingHeroPhoto] = useState(false);
+
+  // Handle direct Hero Banner photo selection without URL
+  const handleHeroPhotoSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      setIsUploadingHeroPhoto(true);
+      const base64 = await processImageFile(file, 1000, 0.85);
+      setHeroImageUrl(base64);
+    } catch (err: any) {
+      alert(err.message || 'फोटो प्रोसेस करने में समस्या आई।');
+    } finally {
+      setIsUploadingHeroPhoto(false);
+      if (heroFileInputRef.current) heroFileInputRef.current.value = '';
+    }
+  };
+  const [dailyQuote, setDailyQuote] = useState(
+    config.dailyQuote || 'माँ जगदम्बा की भक्ति से आत्मबल, सुख एवं शांति की प्राप्ति होती है।'
+  );
+  const [templePhone, setTemplePhone] = useState(config.phone);
+  const [templeEmail, setTempleEmail] = useState(config.email);
+  const [templeAddress, setTempleAddress] = useState(config.address);
 
   // Content Settings State
   const [contentAbout, setContentAbout] = useState(config.aboutText);
@@ -187,6 +451,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
   const [contentAartiEvening, setContentAartiEvening] = useState(config.aartiEvening);
   const [contentTimings, setContentTimings] = useState(config.darshanTimings);
   const [contentSuccess, setContentSuccess] = useState('');
+
+  // Calendar Festivals State
+  const [newFestTitle, setNewFestTitle] = useState('');
+  const [newFestDate, setNewFestDate] = useState('');
+  const [newFestTithi, setNewFestTithi] = useState('');
+  const [newFestDesc, setNewFestDesc] = useState('');
+  const [festSuccess, setFestSuccess] = useState('');
 
   // Online Donations Filtered
   const onlineDonations = donations
@@ -275,6 +546,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
 
     try {
       templeStore.deleteDonation(deleteTargetDonation.id, adminPasswordInput);
+      setSyncToastMessage(
+        `✅ दान रिकॉर्ड (${deleteTargetDonation.receiptNo || deleteTargetDonation.name}) हटा दिया गया तथा Google Sheet से भी स्वतः हटा दिया गया!`
+      );
+      setTimeout(() => setSyncToastMessage(null), 5000);
       setDeleteTargetDonation(null);
       setAdminPasswordInput('');
       rerender();
@@ -303,7 +578,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
       setNewStaffName('');
       setNewStaffMobile('');
       setNewStaffId('');
-      setNewStaffPassword('mandir123');
+      setNewStaffPassword('');
       setNewStaffPhoto('');
       rerender();
       setTimeout(() => setStaffFormSuccess(''), 4000);
@@ -337,8 +612,8 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
       upiId: qrUpiId.trim(),
       qrImageUrl: qrImageUrl.trim(),
     });
-    setQrSuccessMsg('QR कोड एवं UPI ID सेटिंग्स सफलतापूर्वक अपडेट की गईं!');
-    setTimeout(() => setQrSuccessMsg(''), 4000);
+    setQrSuccessMsg('⚡ QR कोड एवं UPI ID तुरंत लाइव अपडेट हो गए हैं! (Changes Live Instantly)');
+    setTimeout(() => setQrSuccessMsg(''), 5000);
     rerender();
   };
 
@@ -359,18 +634,50 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
     rerender();
   };
 
-  // Save Content Settings
-  const handleSaveContent = (e: React.FormEvent) => {
+  // Save Home Page & Content Settings
+  const handleSaveHomePage = (e: React.FormEvent) => {
     e.preventDefault();
     templeStore.updateConfig({
+      heroBadge,
+      heroTitle,
+      heroSubtitle,
+      heroShloka,
+      heroImageUrl,
+      heroImageCaption,
+      heroImageSubCaption,
+      dailyQuote,
       aboutText: contentAbout,
       historyText: contentHistory,
       aartiMorning: contentAartiMorning,
       aartiEvening: contentAartiEvening,
       darshanTimings: contentTimings,
+      phone: templePhone,
+      email: templeEmail,
+      address: templeAddress,
     });
-    setContentSuccess('मंदिर इतिहास एवं आरती समय विवरण सहेज लिया गया!');
-    setTimeout(() => setContentSuccess(''), 4000);
+    templeStore.logAction('HOME_PAGE_UPDATED', 'एडमिन द्वारा मुख्य पृष्ठ (Home Page) विवरण अपडेट किया गया', 'Super Admin');
+    setContentSuccess('⚡ मुख्य पृष्ठ (Home Page) में किए गए बदलाव तुरंत लाइव हो गए हैं! (Changes Live Instantly)');
+    setTimeout(() => setContentSuccess(''), 5000);
+    rerender();
+  };
+
+  // Add Calendar Festival Item
+  const handleAddFestival = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newFestTitle.trim() || !newFestDate.trim()) return;
+    templeStore.addCalendarItem({
+      title: newFestTitle.trim(),
+      date: newFestDate.trim(),
+      tithi: newFestTithi.trim(),
+      description: newFestDesc.trim(),
+    });
+    templeStore.logAction('CALENDAR_ITEM_ADDED', `नया त्योहार जोड़ा गया: ${newFestTitle.trim()}`, 'Super Admin');
+    setNewFestTitle('');
+    setNewFestDate('');
+    setNewFestTithi('');
+    setNewFestDesc('');
+    setFestSuccess('⚡ त्योहार तुरंत लाइव कैलेंडर में जुड़ गया! (Live Instantly)');
+    setTimeout(() => setFestSuccess(''), 4000);
     rerender();
   };
 
@@ -390,6 +697,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
                 </h1>
                 <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-[#FFD700] text-stone-950">
                   सर्व-अधिकार प्राप्त
+                </span>
+                <span className="hidden sm:inline-flex items-center gap-1.5 px-3 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[11px] font-bold">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                  ⚡ लाइव सिंक (Instant Live)
                 </span>
               </div>
               <p className="text-xs text-amber-200 mt-0.5">
@@ -416,6 +727,36 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
             </button>
           </div>
         </div>
+
+        {/* SYNC / ACTION TOAST NOTIFICATION */}
+        {syncToastMessage && (
+          <div className="p-4 rounded-2xl bg-stone-900 text-white border-2 border-emerald-400 shadow-2xl flex flex-wrap items-center justify-between gap-4 animate-in fade-in slide-in-from-top-4 duration-200">
+            <div className="flex items-center gap-3">
+              <span className="text-xl">⚡</span>
+              <div className="text-xs sm:text-sm font-bold text-emerald-300">
+                {syncToastMessage}
+                {downloadBlobUrl && (
+                  <a
+                    href={downloadBlobUrl.url}
+                    download={downloadBlobUrl.name}
+                    className="ml-3 inline-flex items-center gap-1 px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs shadow-sm transition"
+                  >
+                    ⬇️ यहाँ क्लिक कर सीधे सेव करें
+                  </a>
+                )}
+              </div>
+            </div>
+            <button
+              onClick={() => {
+                setSyncToastMessage(null);
+                setDownloadBlobUrl(null);
+              }}
+              className="text-stone-400 hover:text-white text-xs font-bold px-2.5 py-1 rounded-lg hover:bg-stone-800 cursor-pointer"
+            >
+              ✕ बंद करें
+            </button>
+          </div>
+        )}
 
         {/* DASHBOARD 4 BOXES FROM USER BRIEF:
             Total Online Approved ₹ | Total Cash All Staff ₹ | Pending Count | Total Staff Count */}
@@ -582,7 +923,19 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
             }`}
           >
             <FileText className="w-4 h-4" />
-            <span>6. Mandir Info & Calendar</span>
+            <span>6. Home Page Edit (मुख्य पृष्ठ संपादन)</span>
+          </button>
+
+          <button
+            onClick={() => setActiveMenu('gallery')}
+            className={`px-3.5 py-2 rounded-xl transition cursor-pointer flex items-center gap-1.5 ${
+              activeMenu === 'gallery'
+                ? 'bg-[#7a0000] text-[#FFD700] shadow'
+                : 'text-stone-700 hover:bg-stone-100'
+            }`}
+          >
+            <Camera className="w-4 h-4" />
+            <span>7. Photo Gallery ({config.galleryPhotos?.length || 0})</span>
           </button>
 
           <button
@@ -594,7 +947,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
             }`}
           >
             <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
-            <span>7. Google Sheet Sync</span>
+            <span>8. Google Sheet Sync</span>
           </button>
         </div>
 
@@ -930,7 +1283,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
                     <input
                       type={showNewStaffPass ? 'text' : 'password'}
                       required
-                      placeholder="उदा: mandir123"
+                      placeholder="पासवर्ड दर्ज करें"
                       value={newStaffPassword}
                       onChange={(e) => setNewStaffPassword(e.target.value)}
                       className="w-full px-3 py-2 pr-8 rounded-xl border border-stone-300 text-xs font-mono focus:ring-2 focus:ring-[#7a0000] outline-hidden"
@@ -947,15 +1300,56 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
 
                 <div>
                   <label className="block text-xs font-bold text-stone-700 mb-1">
-                    Photo URL (वैकल्पिक)
+                    पहचान पत्र फोटो (ID Card Photo - बिना URL)
                   </label>
+                  {/* Hidden file input */}
                   <input
-                    type="url"
-                    placeholder="https://... photo url"
-                    value={newStaffPhoto}
-                    onChange={(e) => setNewStaffPhoto(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs focus:ring-2 focus:ring-[#7a0000] outline-hidden"
+                    ref={newStaffFileInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={handleNewStaffPhotoSelect}
                   />
+
+                  <div className="flex items-center gap-2.5">
+                    {newStaffPhoto ? (
+                      <div className="relative group shrink-0">
+                        <img
+                          src={newStaffPhoto}
+                          alt="New Staff Preview"
+                          className="w-10 h-10 rounded-full object-cover border-2 border-[#FFD700] shadow-sm"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setNewStaffPhoto('')}
+                          className="absolute -top-1 -right-1 p-0.5 bg-red-600 text-white rounded-full hover:bg-red-700 shadow cursor-pointer"
+                          title="फोटो हटाएं"
+                        >
+                          <X className="w-2.5 h-2.5" />
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="w-10 h-10 rounded-full border-2 border-dashed border-amber-300 bg-amber-50/50 flex items-center justify-center text-amber-700 shrink-0">
+                        <Camera className="w-4 h-4" />
+                      </div>
+                    )}
+
+                    <button
+                      type="button"
+                      disabled={isUploadingNewStaffPhoto}
+                      onClick={() => newStaffFileInputRef.current?.click()}
+                      className="flex-1 px-3 py-2 rounded-xl bg-amber-50 hover:bg-amber-100 border border-amber-300 text-[#7a0000] text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition shadow-xs active:scale-98"
+                    >
+                      <Camera className="w-3.5 h-3.5 text-[#7a0000]" />
+                      <span>
+                        {isUploadingNewStaffPhoto
+                          ? 'प्रोसेसिंग...'
+                          : newStaffPhoto
+                          ? 'फोटो बदलें (Change)'
+                          : '📷 सीधे फोटो चुनें (Upload)'}
+                      </span>
+                    </button>
+                  </div>
                 </div>
 
                 <div className="sm:col-span-3 pt-2">
@@ -998,11 +1392,23 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
                       return (
                         <tr key={s.id} className="hover:bg-amber-50/40 transition">
                           <td className="py-3 px-3">
-                            <img
-                              src={s.photoUrl}
-                              alt={s.name}
-                              className="w-10 h-10 rounded-full object-cover border border-[#FFD700]"
-                            />
+                            <div
+                              className="relative group cursor-pointer inline-block"
+                              onClick={() => setStaffIdCardView(s)}
+                              title="पहचान पत्र देखें / फोटो बदलें"
+                            >
+                              <img
+                                src={
+                                  s.photoUrl ||
+                                  'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=300&q=80'
+                                }
+                                alt={s.name}
+                                className="w-10 h-10 rounded-full object-cover border-2 border-[#FFD700] shadow-xs"
+                              />
+                              <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 rounded-full flex items-center justify-center transition text-white">
+                                <Camera className="w-4 h-4 text-[#FFD700]" />
+                              </div>
+                            </div>
                           </td>
                           <td className="py-3 px-3 font-medium text-stone-900">
                             <div>{s.name}</div>
@@ -1045,6 +1451,14 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
                           </td>
                           <td className="py-3 px-3 text-right">
                             <div className="flex items-center justify-end gap-1.5">
+                              {/* ID Card button: view front & back ID card */}
+                              <button
+                                onClick={() => setStaffIdCardView(s)}
+                                className="px-2.5 py-1 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-950 font-bold text-xs cursor-pointer border border-amber-300 flex items-center gap-1"
+                                title="पहचान पत्र (Front + Back) देखें व प्रिंट करें"
+                              >
+                                ID Card
+                              </button>
                               {/* Details button: view all receipts collected by staff */}
                               <button
                                 onClick={() => setStaffDetailView(s)}
@@ -1157,6 +1571,18 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
                   </div>
                 </div>
               </div>
+            )}
+
+            {/* Staff ID Card Modal (Front + Back) */}
+            {staffIdCardView && (
+              <StaffIdCard
+                staff={staffIdCardView}
+                onClose={() => setStaffIdCardView(null)}
+                onUpdateStaff={(updated) => {
+                  setStaffIdCardView(updated);
+                  rerender();
+                }}
+              />
             )}
           </div>
         )}
@@ -1342,14 +1768,37 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
 
               <div>
                 <label className="block text-xs font-bold uppercase tracking-wider text-stone-700 mb-1.5">
-                  QR इमेज URL
+                  QR कोड फोटो (QR Photo / Bank Scanner)
                 </label>
+                <input
+                  ref={qrFileInputRef}
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={handleQrPhotoSelect}
+                />
+                <div className="flex flex-col sm:flex-row items-center gap-2 mb-2">
+                  <button
+                    type="button"
+                    disabled={isUploadingQrPhoto}
+                    onClick={() => qrFileInputRef.current?.click()}
+                    className="w-full sm:w-auto px-4 py-2.5 rounded-xl bg-amber-100 hover:bg-amber-200 border border-amber-300 text-[#7a0000] font-bold text-xs flex items-center justify-center gap-2 cursor-pointer transition shadow-xs"
+                  >
+                    <Upload className="w-4 h-4" />
+                    <span>
+                      {isUploadingQrPhoto
+                        ? 'QR प्रोसेस हो रहा है...'
+                        : '📷 सीधे QR कोड फोटो अपलोड करें (बिना URL)'}
+                    </span>
+                  </button>
+                  <span className="text-[11px] text-stone-400">या नीचे ऑनलाइन लिंक (URL) दर्ज करें:</span>
+                </div>
                 <input
                   type="url"
                   placeholder="https://... QR image url"
                   value={qrImageUrl}
                   onChange={(e) => setQrImageUrl(e.target.value)}
-                  className="w-full px-4 py-2.5 rounded-xl border border-stone-300 text-sm focus:ring-2 focus:ring-[#7a0000] outline-hidden font-mono"
+                  className="w-full px-4 py-2.5 rounded-xl border border-stone-300 text-xs focus:ring-2 focus:ring-[#7a0000] outline-hidden font-mono"
                 />
               </div>
 
@@ -1540,107 +1989,450 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
         )}
 
         {/* ------------------------------------------------------------- */}
-        {/* MENU 6: MANDIR INFO & CALENDAR EDIT */}
+        {/* MENU 6: HOME PAGE & MANDIR CONTENT EDIT */}
         {/* ------------------------------------------------------------- */}
         {activeMenu === 'content' && (
           <div className="space-y-6">
-            <div className="bg-white rounded-3xl p-6 sm:p-8 shadow-md border border-stone-200 space-y-5">
-              <div>
-                <h2 className="text-xl font-bold font-heading text-stone-900">
-                  मंदिर परिचय एवं दर्शन समय संपादन
-                </h2>
-                <p className="text-xs text-stone-500 mt-1">
-                  मुख्य पृष्ठ पर प्रदर्शित होने वाला 'About Mandir' एवं आरती समय यहाँ से संपादित करें।
-                </p>
+            <div className="bg-white rounded-3xl p-6 sm:p-8 shadow-md border border-stone-200 space-y-6">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-stone-200">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-[#7a0000] text-[#FFD700]">
+                      मुख्य पृष्ठ संपादन (Home Page Editor)
+                    </span>
+                    <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-[#7a0000] border border-amber-300">
+                      लाइव अपडेट
+                    </span>
+                  </div>
+                  <h2 className="text-xl sm:text-2xl font-bold font-heading text-stone-900 mt-2">
+                    मुख्य पृष्ठ (Home Page) सामग्री एवं सेटिंग्स संपादन
+                  </h2>
+                  <p className="text-xs sm:text-sm text-stone-500 mt-0.5">
+                    यहाँ किए गए सभी बदलाव (बैनर, शीर्षक, श्लोक, फोटो, आरती समय व इतिहास) मुख्य पृष्ठ पर तुरंत दिखाई देंगे।
+                  </p>
+                </div>
+
+                <button
+                  onClick={handleSaveHomePage}
+                  className="px-6 py-3 rounded-xl bg-gradient-to-r from-[#7a0000] to-[#990000] hover:scale-102 text-[#FFD700] text-xs sm:text-sm font-bold shadow-md cursor-pointer transition flex items-center justify-center gap-2"
+                >
+                  <Check className="w-4 h-4" />
+                  <span>परिवर्तन सहेजें (Save All Changes)</span>
+                </button>
               </div>
 
               {contentSuccess && (
-                <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-300 text-emerald-800 text-xs font-bold">
-                  {contentSuccess}
+                <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-300 text-emerald-800 text-xs sm:text-sm font-bold flex items-center gap-2 animate-in fade-in">
+                  <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                  <span>{contentSuccess}</span>
                 </div>
               )}
 
-              <form onSubmit={handleSaveContent} className="space-y-4">
+              <form onSubmit={handleSaveHomePage} className="space-y-6">
+                {/* 1. HERO BANNER SETTINGS */}
+                <div className="bg-amber-50/50 p-5 sm:p-6 rounded-2xl border border-amber-200 space-y-4">
+                  <div className="flex items-center gap-2 text-[#7a0000] font-bold text-sm sm:text-base font-heading">
+                    <Sparkles className="w-5 h-5 text-amber-600" />
+                    <span>1. मुख्य पृष्ठ बैनर एवं शीर्षक (Hero Banner Headings)</span>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                      <label className="block text-xs font-bold text-stone-700 mb-1">
+                        शीर्ष बैज / टैगलाइन (Hero Badge)
+                      </label>
+                      <input
+                        type="text"
+                        value={heroBadge}
+                        onChange={(e) => setHeroBadge(e.target.value)}
+                        placeholder="उदा: उत्तर बिहार का प्रसिद्ध जागृत शक्तिपीठ"
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-stone-300 text-xs bg-white outline-hidden focus:ring-2 focus:ring-[#7a0000]"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-stone-700 mb-1">
+                        मुख्य मंदिर शीर्षक (Main Title) <span className="text-red-600">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={heroTitle}
+                        onChange={(e) => setHeroTitle(e.target.value)}
+                        placeholder="उदा: जय माँ जगदंबा"
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-stone-300 text-xs bg-white font-bold outline-hidden focus:ring-2 focus:ring-[#7a0000]"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-stone-700 mb-1">
+                        उपशीर्षक / स्थान (Subtitle)
+                      </label>
+                      <input
+                        type="text"
+                        value={heroSubtitle}
+                        onChange={(e) => setHeroSubtitle(e.target.value)}
+                        placeholder="उदा: मथुरापुर धाम, मुजफ्फरपुर"
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-stone-300 text-xs bg-white outline-hidden focus:ring-2 focus:ring-[#7a0000]"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-stone-700 mb-1">
+                      पवित्र संस्कृत श्लोक (Sacred Shloka)
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={heroShloka}
+                      onChange={(e) => setHeroShloka(e.target.value)}
+                      placeholder='उदा: "सर्वमङ्गलमाङ्गल्ये शिवे सर्वार्थसाधिके । शरण्ये त्र्यम्बके गौरि नारायणि नमोऽस्तु ते ॥"'
+                      className="w-full px-3.5 py-2 rounded-xl border border-stone-300 text-xs font-serif bg-white outline-hidden focus:ring-2 focus:ring-[#7a0000]"
+                    />
+                  </div>
+
+                  {/* Hero Right Photo Settings */}
+                  <div className="pt-3 border-t border-amber-200/80 grid grid-cols-1 md:grid-cols-12 gap-4 items-center">
+                    <div className="md:col-span-8 space-y-3">
+                      <div>
+                        <label className="block text-xs font-bold text-stone-700 mb-1.5 uppercase tracking-wider">
+                          मुख्य दर्शन फोटो (Hero Banner Image)
+                        </label>
+                        <input
+                          ref={heroFileInputRef}
+                          type="file"
+                          accept="image/*"
+                          className="hidden"
+                          onChange={handleHeroPhotoSelect}
+                        />
+                        <div className="flex flex-col sm:flex-row items-center gap-2 mb-2">
+                          <button
+                            type="button"
+                            disabled={isUploadingHeroPhoto}
+                            onClick={() => heroFileInputRef.current?.click()}
+                            className="w-full sm:w-auto px-4 py-2 rounded-xl bg-amber-100 hover:bg-amber-200 border border-amber-300 text-[#7a0000] font-bold text-xs flex items-center justify-center gap-2 cursor-pointer transition shadow-xs"
+                          >
+                            <Upload className="w-4 h-4" />
+                            <span>
+                              {isUploadingHeroPhoto
+                                ? 'फोटो प्रोसेस हो रही है...'
+                                : '📷 सीधे नई फोटो अपलोड करें (बिना URL)'}
+                            </span>
+                          </button>
+                          <span className="text-[11px] text-stone-400">या नीचे ऑनलाइन लिंक (URL) दर्ज करें:</span>
+                        </div>
+                        <input
+                          type="url"
+                          value={heroImageUrl}
+                          onChange={(e) => setHeroImageUrl(e.target.value)}
+                          placeholder="https://images.unsplash.com/..."
+                          className="w-full px-3.5 py-2 rounded-xl border border-stone-300 text-xs font-mono bg-white outline-hidden focus:ring-2 focus:ring-[#7a0000]"
+                        />
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs font-bold text-stone-700 mb-1">
+                            फोटो कैप्शन (Photo Caption)
+                          </label>
+                          <input
+                            type="text"
+                            value={heroImageCaption}
+                            onChange={(e) => setHeroImageCaption(e.target.value)}
+                            placeholder="उदा: माँ जगदम्बा के पावन दर्शन"
+                            className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs bg-white outline-hidden"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-stone-700 mb-1">
+                            कपाट समय पंक्ति (Subcaption)
+                          </label>
+                          <input
+                            type="text"
+                            value={heroImageSubCaption}
+                            onChange={(e) => setHeroImageSubCaption(e.target.value)}
+                            placeholder="उदा: प्रतिदिन प्रातः 04:30 बजे से मंदिर कपाट खुलते हैं"
+                            className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs bg-white outline-hidden"
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Thumbnail Preview */}
+                    <div className="md:col-span-4 flex justify-center">
+                      <div className="p-2 bg-white rounded-xl border-2 border-[#FFD700] shadow-sm text-center w-full max-w-[200px]">
+                        <img
+                          src={heroImageUrl}
+                          alt="Hero Preview"
+                          onError={(e) => {
+                            (e.target as HTMLImageElement).src =
+                              'https://via.placeholder.com/200x150?text=Invalid+Image';
+                          }}
+                          className="w-full h-32 object-cover rounded-lg mx-auto"
+                        />
+                        <div className="text-[11px] font-bold text-stone-800 mt-1 truncate">
+                          {heroImageCaption || 'माँ जगदम्बा दर्शन'}
+                        </div>
+                        <div className="text-[10px] text-stone-500 truncate">
+                          {heroImageSubCaption}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 2. DAILY QUOTE / SUVICHAR */}
+                <div className="bg-stone-50 p-5 rounded-2xl border border-stone-200 space-y-3">
+                  <div className="text-stone-900 font-bold text-sm font-heading flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-amber-500" />
+                    <span>2. दैनिक पावन सुविचार / विचार (Daily Sacred Quote)</span>
+                  </div>
+                  <div>
+                    <input
+                      type="text"
+                      value={dailyQuote}
+                      onChange={(e) => setDailyQuote(e.target.value)}
+                      placeholder="उदा: माँ जगदम्बा की भक्ति से आत्मबल, सुख एवं शांति की प्राप्ति होती है।"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-stone-300 text-xs sm:text-sm bg-white outline-hidden focus:ring-2 focus:ring-[#7a0000]"
+                    />
+                  </div>
+                </div>
+
+                {/* 3. ABOUT MANDIR & HISTORY */}
+                <div className="bg-stone-50 p-5 rounded-2xl border border-stone-200 space-y-4">
+                  <div className="text-stone-900 font-bold text-sm font-heading flex items-center gap-2">
+                    <FileText className="w-4 h-4 text-[#7a0000]" />
+                    <span>3. मंदिर परिचय एवं इतिहास (About Mandir & History)</span>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-stone-700 mb-1">
+                      मंदिर परिचय (About Mandir Text)
+                    </label>
+                    <textarea
+                      rows={3}
+                      value={contentAbout}
+                      onChange={(e) => setContentAbout(e.target.value)}
+                      className="w-full px-4 py-2.5 rounded-xl border border-stone-300 text-xs sm:text-sm bg-white focus:ring-2 focus:ring-[#7a0000] outline-hidden leading-relaxed"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-stone-700 mb-1">
+                      इतिहास एवं महिमा (History Text)
+                    </label>
+                    <textarea
+                      rows={3}
+                      value={contentHistory}
+                      onChange={(e) => setContentHistory(e.target.value)}
+                      className="w-full px-4 py-2.5 rounded-xl border border-stone-300 text-xs sm:text-sm bg-white focus:ring-2 focus:ring-[#7a0000] outline-hidden leading-relaxed"
+                    />
+                  </div>
+                </div>
+
+                {/* 4. AARTI & DARSHAN TIMINGS */}
+                <div className="bg-stone-50 p-5 rounded-2xl border border-stone-200 space-y-4">
+                  <div className="text-stone-900 font-bold text-sm font-heading flex items-center gap-2">
+                    <Clock className="w-4 h-4 text-amber-600" />
+                    <span>4. आरती एवं दर्शन समय (Aarti & Darshan Timings)</span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div>
+                      <label className="block text-xs font-bold text-stone-700 mb-1">
+                        प्रातः मंगला आरती समय
+                      </label>
+                      <input
+                        type="text"
+                        value={contentAartiMorning}
+                        onChange={(e) => setContentAartiMorning(e.target.value)}
+                        placeholder="उदा: प्रातः 05:00 AM"
+                        className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs bg-white outline-hidden font-mono"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-stone-700 mb-1">
+                        संध्या महाआरती समय
+                      </label>
+                      <input
+                        type="text"
+                        value={contentAartiEvening}
+                        onChange={(e) => setContentAartiEvening(e.target.value)}
+                        placeholder="उदा: सायं 07:00 PM"
+                        className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs bg-white outline-hidden font-mono"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-stone-700 mb-1">
+                        कपाट खुलने / दर्शन समय
+                      </label>
+                      <input
+                        type="text"
+                        value={contentTimings}
+                        onChange={(e) => setContentTimings(e.target.value)}
+                        placeholder="उदा: प्रातः 04:30 AM से..."
+                        className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs bg-white outline-hidden"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* 5. CONTACT & ADDRESS */}
+                <div className="bg-stone-50 p-5 rounded-2xl border border-stone-200 space-y-4">
+                  <div className="text-stone-900 font-bold text-sm font-heading flex items-center gap-2">
+                    <Globe className="w-4 h-4 text-blue-600" />
+                    <span>5. संपर्क जानकारी एवं पता (Helpline, Email & Address)</span>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div>
+                      <label className="block text-xs font-bold text-stone-700 mb-1">
+                        मंदिर हेल्पलाइन नंबर (Phone)
+                      </label>
+                      <input
+                        type="tel"
+                        value={templePhone}
+                        onChange={(e) => setTemplePhone(e.target.value)}
+                        className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs bg-white font-mono outline-hidden"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-stone-700 mb-1">
+                        आधिकारिक ईमेल (Email)
+                      </label>
+                      <input
+                        type="email"
+                        value={templeEmail}
+                        onChange={(e) => setTempleEmail(e.target.value)}
+                        className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs bg-white font-mono outline-hidden"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-stone-700 mb-1">
+                        मंदिर का पूर्ण पता (Address)
+                      </label>
+                      <input
+                        type="text"
+                        value={templeAddress}
+                        onChange={(e) => setTempleAddress(e.target.value)}
+                        className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs bg-white outline-hidden"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Save Button Bar */}
+                <div className="pt-2 flex items-center gap-3">
+                  <button
+                    type="submit"
+                    className="px-8 py-3 rounded-xl bg-[#7a0000] hover:bg-[#990000] text-[#FFD700] text-sm font-bold shadow-lg cursor-pointer transition flex items-center gap-2 hover:scale-102"
+                  >
+                    <Check className="w-4 h-4" />
+                    <span>मुख्य पृष्ठ सहेजें (Save Home Page)</span>
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            {/* 6. UPCOMING FESTIVALS & CALENDAR EDIT */}
+            <div className="bg-white rounded-3xl p-6 sm:p-8 shadow-md border border-stone-200 space-y-5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-stone-200">
                 <div>
-                  <label className="block text-xs font-bold text-stone-700 mb-1">
-                    मंदिर परिचय (About Mandir)
-                  </label>
-                  <textarea
-                    rows={3}
-                    value={contentAbout}
-                    onChange={(e) => setContentAbout(e.target.value)}
-                    className="w-full px-4 py-2.5 rounded-xl border border-stone-300 text-xs sm:text-sm focus:ring-2 focus:ring-[#7a0000] outline-hidden"
-                  />
+                  <h3 className="text-lg font-bold font-heading text-stone-900">
+                    आगामी पर्व एवं त्योहार कैलेंडर (Calendar & Festival Manager)
+                  </h3>
+                  <p className="text-xs text-stone-500">
+                    यहाँ से मुख्य पृष्ठ के दाएँ कॉलम में दिखने वाले आगामी पर्व जोड़े और प्रबंधित करें।
+                  </p>
+                </div>
+                <span className="text-xs font-bold text-stone-600 bg-stone-100 px-3 py-1 rounded-full">
+                  कुल पर्व: {calendar.length}
+                </span>
+              </div>
+
+              {festSuccess && (
+                <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-300 text-emerald-800 text-xs font-bold">
+                  {festSuccess}
+                </div>
+              )}
+
+              {/* Add Festival Form */}
+              <form onSubmit={handleAddFestival} className="p-4 bg-amber-50/60 rounded-2xl border border-amber-200 space-y-3">
+                <div className="text-xs font-bold text-[#7a0000] uppercase tracking-wider">
+                  + नया पर्व / त्योहार जोड़ें
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold text-stone-700 mb-1">
+                      पर्व का नाम <span className="text-red-600">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="उदा: शारदीय नवरात्र घटस्थापना"
+                      value={newFestTitle}
+                      onChange={(e) => setNewFestTitle(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs bg-white outline-hidden"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-stone-700 mb-1">
+                      दिनांक / समय <span className="text-red-600">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="उदा: 03 अक्टूबर 2026"
+                      value={newFestDate}
+                      onChange={(e) => setNewFestDate(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs bg-white outline-hidden"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-stone-700 mb-1">
+                      शुभ तिथि (वैकल्पिक)
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="उदा: प्रतिपदा, आश्विन शुक्ल"
+                      value={newFestTithi}
+                      onChange={(e) => setNewFestTithi(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs bg-white outline-hidden"
+                    />
+                  </div>
                 </div>
 
                 <div>
-                  <label className="block text-xs font-bold text-stone-700 mb-1">
-                    इतिहास एवं महिमा (History)
+                  <label className="block text-[11px] font-bold text-stone-700 mb-1">
+                    विवरण (वैकल्पिक)
                   </label>
-                  <textarea
-                    rows={3}
-                    value={contentHistory}
-                    onChange={(e) => setContentHistory(e.target.value)}
-                    className="w-full px-4 py-2.5 rounded-xl border border-stone-300 text-xs sm:text-sm focus:ring-2 focus:ring-[#7a0000] outline-hidden"
+                  <input
+                    type="text"
+                    placeholder="उदा: कलश स्थापना एवं माँ शैलपुत्री पूजन उत्सव..."
+                    value={newFestDesc}
+                    onChange={(e) => setNewFestDesc(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs bg-white outline-hidden"
                   />
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                  <div>
-                    <label className="block text-xs font-bold text-stone-700 mb-1">
-                      प्रातः आरती समय
-                    </label>
-                    <input
-                      type="text"
-                      value={contentAartiMorning}
-                      onChange={(e) => setContentAartiMorning(e.target.value)}
-                      className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs outline-hidden"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-bold text-stone-700 mb-1">
-                      संध्या आरती समय
-                    </label>
-                    <input
-                      type="text"
-                      value={contentAartiEvening}
-                      onChange={(e) => setContentAartiEvening(e.target.value)}
-                      className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs outline-hidden"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-bold text-stone-700 mb-1">
-                      कपाट खुलने का समय
-                    </label>
-                    <input
-                      type="text"
-                      value={contentTimings}
-                      onChange={(e) => setContentTimings(e.target.value)}
-                      className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs outline-hidden"
-                    />
-                  </div>
                 </div>
 
                 <button
                   type="submit"
-                  className="px-6 py-2.5 rounded-xl bg-[#7a0000] hover:bg-[#990000] text-[#FFD700] text-xs font-bold shadow cursor-pointer transition"
+                  className="px-5 py-2 rounded-xl bg-[#7a0000] hover:bg-[#990000] text-[#FFD700] text-xs font-bold cursor-pointer transition shadow"
                 >
-                  विवरण सहेजें (Save Changes)
+                  + त्योहार जोड़ें (Add Festival)
                 </button>
               </form>
-            </div>
 
-            {/* Calendar & Upcoming Festivals */}
-            <div className="bg-white rounded-3xl p-6 shadow-md border border-stone-200 space-y-4">
-              <h3 className="text-lg font-bold font-heading text-stone-900">
-                आगामी पर्व एवं त्योहार सूची (Calendar Tyohar List)
-              </h3>
-
+              {/* Current Festivals List */}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 {calendar.map((c) => (
-                  <div key={c.id} className="p-4 rounded-2xl bg-amber-50/70 border border-amber-300 relative">
+                  <div key={c.id} className="p-4 rounded-2xl bg-white border border-stone-200 hover:border-amber-400 relative shadow-xs transition">
                     <button
                       onClick={() => {
                         templeStore.deleteCalendarItem(c.id);
@@ -1653,9 +2445,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
                     </button>
                     <div className="text-xs font-mono font-bold text-[#7a0000] mb-0.5">{c.date}</div>
                     <h4 className="text-sm font-bold text-stone-900">{c.title}</h4>
-                    <p className="text-[11px] text-stone-600 mt-1">{c.description}</p>
+                    {c.description && <p className="text-[11px] text-stone-600 mt-1">{c.description}</p>}
                     {c.tithi && (
-                      <span className="mt-2 inline-block text-[10px] bg-amber-200 text-amber-900 px-2 py-0.5 rounded font-medium">
+                      <span className="mt-2 inline-block text-[10px] bg-amber-100 text-amber-900 px-2 py-0.5 rounded font-medium border border-amber-200">
                         {c.tithi}
                       </span>
                     )}
@@ -1664,6 +2456,13 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
               </div>
             </div>
           </div>
+        )}
+
+        {/* ------------------------------------------------------------- */}
+        {/* MENU 7: PHOTO GALLERY MANAGER (ADMIN) */}
+        {/* ------------------------------------------------------------- */}
+        {activeMenu === 'gallery' && (
+          <GalleryManager role="admin" onRefresh={rerender} />
         )}
 
         {/* ------------------------------------------------------------- */}
@@ -1676,91 +2475,217 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
               <div>
                 <div className="flex items-center gap-2">
                   <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
-                    📊 Google Sheet & Excel
+                    📊 Google Sheets API
                   </span>
-                  <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-blue-100 text-blue-800 border border-blue-300">
-                    Google Drive Cloud Backup
+                  <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-amber-100 text-amber-800 border border-amber-300 flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                    लाइव ऑटो-डिलीट सिंक
                   </span>
                 </div>
                 <h2 className="text-xl sm:text-2xl font-bold font-heading text-stone-900 mt-2">
-                  Google Sheet Auto-Sync & Excel Export
+                  Google Sheet Auto-Sync & Real-Time Mirror
                 </h2>
                 <p className="text-xs sm:text-sm text-stone-500 mt-0.5">
-                  हर नया दान (Online व Cash) तुरंत Google Sheet में दर्ज होता है | लाइव शीट खोलें अथवा सम्पूर्ण डेटा Excel में डाउनलोड करें
+                  माँ जगदंबा स्थान, मथुरापुर • जो दान सूची में रहेगा, वही Google Sheet में रहेगा। डिलीट करने पर स्वतः हटेगा।
                 </p>
               </div>
 
-              {/* Top 2 Buttons */}
+              {/* Top Action Buttons */}
               <div className="flex flex-wrap items-center gap-3">
-                {/* Button 1: [📊 Google Sheet में देखें (Live)] */}
+                {/* Button 1: Open Google Sheet */}
                 <button
                   type="button"
                   onClick={handleOpenGoogleSheet}
                   className="px-5 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs sm:text-sm flex items-center gap-2 shadow-md transition cursor-pointer hover:scale-102"
                 >
                   <Table className="w-4 h-4 text-emerald-200" />
-                  <span>📊 Google Sheet में देखें (Live)</span>
+                  <span>📊 Google Sheet खोलें (Live)</span>
                 </button>
 
-                {/* Button 2: [⬇️ Excel Download करो] */}
+                {/* Button 2: Mirror Sync Now */}
+                <button
+                  type="button"
+                  disabled={isSyncingSheet}
+                  onClick={handleMirrorSyncNow}
+                  className="px-4 py-2.5 rounded-xl bg-stone-900 hover:bg-black text-amber-300 font-bold text-xs sm:text-sm flex items-center gap-2 shadow-md transition cursor-pointer hover:scale-102 disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-4 h-4 ${isSyncingSheet ? 'animate-spin' : ''}`} />
+                  <span>{isSyncingSheet ? 'सिंक हो रहा है...' : '⚡ अभी सिंक करें (Mirror)'}</span>
+                </button>
+
+                {/* Button 3: Excel Download */}
                 <button
                   type="button"
                   onClick={() => handleDownloadExcel(donations, 'समस्त')}
-                  className="px-5 py-2.5 rounded-xl bg-[#7a0000] hover:bg-[#8c0000] text-[#FFD700] font-bold text-xs sm:text-sm flex items-center gap-2 shadow-md transition cursor-pointer hover:scale-102 border border-[#FFD700]/50"
+                  className="px-4 py-2.5 rounded-xl bg-[#7a0000] hover:bg-[#8c0000] text-[#FFD700] font-bold text-xs sm:text-sm flex items-center gap-2 shadow-md transition cursor-pointer hover:scale-102 border border-[#FFD700]/50"
                 >
                   <Download className="w-4 h-4 text-[#FFD700]" />
-                  <span>⬇️ Excel Download करो</span>
+                  <span>⬇️ Excel (.xlsx)</span>
                 </button>
               </div>
             </div>
 
             {/* Notification Banner */}
             {syncToastMessage && (
-              <div className="p-4 rounded-2xl bg-emerald-100/80 border border-emerald-300 text-emerald-900 text-xs sm:text-sm font-bold flex items-center justify-between gap-3 animate-in fade-in">
-                <div className="flex items-center gap-2">
+              <div className="p-4 rounded-2xl bg-emerald-100/90 border border-emerald-300 text-emerald-950 text-xs sm:text-sm font-bold flex items-center justify-between gap-3 animate-in fade-in shadow-xs">
+                <div className="flex items-center gap-2.5">
                   <CheckCircle2 className="w-5 h-5 text-emerald-700 shrink-0" />
                   <span>{syncToastMessage}</span>
                 </div>
                 <button
                   onClick={() => setSyncToastMessage(null)}
-                  className="text-emerald-700 hover:text-emerald-950 font-bold cursor-pointer"
+                  className="text-emerald-800 hover:text-emerald-950 font-bold cursor-pointer"
                 >
                   ✕
                 </button>
               </div>
             )}
 
-            {/* Setup Form Grid */}
+            {/* Rule Callout: Exact Mirror & Auto-Delete Guarantee */}
+            <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-r from-amber-50 to-orange-50 border-2 border-amber-300/80 shadow-xs space-y-2">
+              <div className="flex items-center gap-2 text-stone-900 font-extrabold text-sm sm:text-base">
+                <span className="text-xl">⚡</span>
+                <span className="font-heading text-[#7a0000]">
+                  ऑटो-डिलीट एवं लाइव मिरर सिंक नियम (Auto-Delete & Live Sync Rule):
+                </span>
+              </div>
+              <p className="text-xs sm:text-sm text-stone-700 leading-relaxed pl-7">
+                <strong>जो दान सूची में रहेगा, वही Google Sheet में रहेगा।</strong> जब भी एडमिन अथवा स्टाफ द्वारा कोई नया दान दर्ज या स्वीकृत किया जाता है, वह स्वतः शीट में जुड़ जाता है। और यदि एडमिन द्वारा किसी दान को हटाया (Delete) जाता है, तो वह Google Sheet से भी <strong>तुरंत अपने-आप स्वतः डिलीट</strong> हो जाता है। कोई पुराना या डुप्लिकेट रिकॉर्ड नहीं बचता।
+              </p>
+            </div>
+
+            {/* SECTION 1: Google Account Connection (Official Workspace OAuth) */}
+            <div className="bg-stone-50 rounded-3xl p-6 border border-stone-200 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-2xl bg-white border border-stone-200 flex items-center justify-center shadow-xs">
+                    <svg version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" className="w-6 h-6">
+                      <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"></path>
+                      <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"></path>
+                      <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"></path>
+                      <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"></path>
+                      <path fill="none" d="M0 0h48v48H0z"></path>
+                    </svg>
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold text-stone-900 font-heading">
+                      Google Workspace खाता अधिकृत करें (Sign In with Google)
+                    </h3>
+                    <p className="text-xs text-stone-500">
+                      Google Sheets एवं Google Drive में स्वतः पंजी बनाने एवं लाइव अपडेट करने हेतु
+                    </p>
+                  </div>
+                </div>
+
+                {/* Connection Status Badge */}
+                {googleUser ? (
+                  <div className="flex items-center gap-2 self-start sm:self-auto">
+                    <span className="px-3 py-1 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300 text-xs font-bold flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+                      कनेक्टेड: {googleUser.email}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleGoogleSignOut}
+                      className="text-xs text-red-600 hover:underline font-bold cursor-pointer"
+                    >
+                      लॉग-आउट
+                    </button>
+                  </div>
+                ) : (
+                  <span className="px-3 py-1 rounded-full bg-stone-200 text-stone-700 text-xs font-bold self-start sm:self-auto">
+                    Google खाता डिस्कनेक्टेड
+                  </span>
+                )}
+              </div>
+
+              {/* Action Buttons for Google Account */}
+              {!googleUser ? (
+                <div className="p-4 bg-white rounded-2xl border border-stone-200 flex flex-col sm:flex-row items-center justify-between gap-4">
+                  <p className="text-xs text-stone-600">
+                    Google खाते से साइन-इन करने पर ऐप सीधे आपके Google Drive में <strong>"माँ जगदम्बा स्थान - दान रसीद पंजी"</strong> शीट बना देगा और हमेशा लाइव सिंक रखेगा।
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleGoogleSignIn}
+                    disabled={isGoogleSigningIn}
+                    className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-white hover:bg-stone-50 text-stone-800 font-bold text-xs sm:text-sm border border-stone-300 shadow-sm flex items-center justify-center gap-2.5 transition cursor-pointer hover:shadow hover:scale-102 shrink-0"
+                  >
+                    <svg version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" className="w-4 h-4">
+                      <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"></path>
+                      <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"></path>
+                      <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"></path>
+                      <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"></path>
+                      <path fill="none" d="M0 0h48v48H0z"></path>
+                    </svg>
+                    <span>{isGoogleSigningIn ? 'Google से जुड़ रहा है...' : 'Sign in with Google'}</span>
+                  </button>
+                </div>
+              ) : (
+                <div className="p-4 bg-emerald-50/70 rounded-2xl border border-emerald-200 flex flex-wrap items-center justify-between gap-3">
+                  <div className="space-y-0.5">
+                    <div className="text-xs font-bold text-emerald-900">
+                      ⚡ Google API लाइव सिंक सक्रिय है
+                    </div>
+                    <div className="text-[11px] text-emerald-800">
+                      खाता: {googleUser.displayName || 'Admin'} ({googleUser.email})
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={isCreatingSheet}
+                      onClick={handleCreateNewSheet}
+                      className="px-4 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs flex items-center gap-1.5 shadow-xs transition cursor-pointer hover:scale-102 disabled:opacity-50"
+                    >
+                      <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+                      <span>{isCreatingSheet ? 'शीट बन रही है...' : '✨ नई Google Sheet स्वतः बनाएँ'}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={isSyncingSheet}
+                      onClick={handleMirrorSyncNow}
+                      className="px-4 py-2 rounded-xl bg-stone-900 hover:bg-black text-amber-300 font-bold text-xs flex items-center gap-1.5 shadow-xs transition cursor-pointer hover:scale-102 disabled:opacity-50"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${isSyncingSheet ? 'animate-spin' : ''}`} />
+                      <span>{isSyncingSheet ? 'मिरर सिंक हो रहा है...' : '🔄 लाइव मिरर सिंक'}</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* SECTION 2: Google Sheet Link Box & Details */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
               {/* Card 1: Google Sheet Link Box */}
               <div className="bg-stone-50 rounded-2xl p-5 border border-stone-200 space-y-4">
                 <div className="flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-xl bg-emerald-600 text-white flex items-center justify-center font-bold">
+                  <div className="w-8 h-8 rounded-xl bg-emerald-600 text-white flex items-center justify-center font-bold text-sm">
                     1
                   </div>
                   <div>
                     <h3 className="text-sm font-bold text-stone-900 font-heading">
-                      Google Sheet Link Box (Admin Settings)
+                      Google Sheet URL या ID (Spreadsheet Link)
                     </h3>
                     <p className="text-xs text-stone-500">
-                      एडमिन अपने Google Drive की Google Sheet का लिंक यहाँ पेस्ट करेगा
+                      अपनी Google Sheet का लिंक पेस्ट करें अथवा ऊपर 'नई Sheet बनाएँ' पर क्लिक करें
                     </p>
                   </div>
                 </div>
 
                 <div className="space-y-2">
                   <label className="text-xs font-bold text-stone-700">
-                    Google Sheet URL (Spreadsheet Link):
+                    Google Spreadsheet Link:
                   </label>
-                  <div className="flex gap-2">
-                    <input
-                      type="url"
-                      value={googleSheetInput}
-                      onChange={(e) => setGoogleSheetInput(e.target.value)}
-                      placeholder="https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit"
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-stone-300 text-xs focus:ring-2 focus:ring-emerald-600 outline-hidden font-mono bg-white"
-                    />
-                  </div>
+                  <input
+                    type="url"
+                    value={googleSheetInput}
+                    onChange={(e) => setGoogleSheetInput(e.target.value)}
+                    placeholder="https://docs.google.com/spreadsheets/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-stone-300 text-xs focus:ring-2 focus:ring-emerald-600 outline-hidden font-mono bg-white"
+                  />
                 </div>
 
                 <div className="pt-2 flex flex-wrap items-center gap-3">
@@ -1770,7 +2695,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
                     className="px-5 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs flex items-center gap-2 shadow-xs transition cursor-pointer hover:scale-102"
                   >
                     <CheckCircle2 className="w-4 h-4" />
-                    <span>Connect Google Sheet</span>
+                    <span>लिंक सहेजें एवं सिंक करें</span>
                   </button>
 
                   <button
@@ -1784,35 +2709,42 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
                 </div>
 
                 <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-200 text-[11px] text-emerald-900 space-y-1">
-                  <div className="font-bold flex items-center gap-1.5">
-                    <span className="w-2 h-2 rounded-full bg-emerald-600 inline-block animate-pulse"></span>
-                    <span>वर्तमान स्थिति: कनेक्टेड (Active Link)</span>
+                  <div className="font-bold flex items-center justify-between">
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-emerald-600 inline-block animate-pulse"></span>
+                      <span>स्थिति: कनेक्टेड व सक्रिय</span>
+                    </div>
+                    {config.googleSheetLastSyncedAt && (
+                      <span className="text-stone-500 font-normal">
+                        अंतिम सिंक: {config.googleSheetLastSyncedAt}
+                      </span>
+                    )}
                   </div>
-                  <div className="font-mono text-emerald-800 truncate">
+                  <div className="font-mono text-emerald-800 truncate text-[10px]">
                     {config.googleSheetUrl || googleSheetInput || 'कोई लिंक सेट नहीं है'}
                   </div>
                 </div>
               </div>
 
-              {/* Card 2: Webhook Endpoint & Sync All */}
+              {/* Card 2: Webhook Endpoint (Fallback / Apps Script) */}
               <div className="bg-stone-50 rounded-2xl p-5 border border-stone-200 space-y-4">
                 <div className="flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-xl bg-blue-600 text-white flex items-center justify-center font-bold">
+                  <div className="w-8 h-8 rounded-xl bg-blue-600 text-white flex items-center justify-center font-bold text-sm">
                     2
                   </div>
                   <div>
                     <h3 className="text-sm font-bold text-stone-900 font-heading">
-                      Auto-Sync Webhook (Apps Script / SheetDB)
+                      वैकल्पिक Webhook URL (Apps Script / SheetDB)
                     </h3>
                     <p className="text-xs text-stone-500">
-                      हर नया दान स्वतः Google Sheet में row जोड़ने के लिए Webhook URL
+                      यदि आप बिना Google लॉगिन के Apps Script Webhook से जोड़ना चाहें
                     </p>
                   </div>
                 </div>
 
                 <div className="space-y-2">
                   <label className="text-xs font-bold text-stone-700">
-                    Google Apps Script Web App URL या SheetDB Endpoint:
+                    Apps Script Web App URL या SheetDB Endpoint:
                   </label>
                   <input
                     type="url"
@@ -1822,7 +2754,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
                     className="w-full px-3.5 py-2.5 rounded-xl border border-stone-300 text-xs focus:ring-2 focus:ring-blue-600 outline-hidden font-mono bg-white"
                   />
                   <p className="text-[11px] text-stone-500">
-                    💡 यदि Webhook URL नहीं है, तो नीचे दिए गए 30-सेकंड Apps Script कोड का उपयोग करें (मुफ़्त)।
+                    💡 सीधे Google Sign-In उपलब्ध है; यह केवल वैकल्पिक बैकअप के लिए है।
                   </p>
                 </div>
 
@@ -1832,7 +2764,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
                     onClick={handleConnectSheet}
                     className="px-4 py-2.5 rounded-xl bg-blue-700 hover:bg-blue-800 text-white font-bold text-xs flex items-center gap-2 shadow-xs transition cursor-pointer hover:scale-102"
                   >
-                    <span>सेटिंग्स सहेजें (Save Webhook)</span>
+                    <span>Webhook सहेजें</span>
                   </button>
 
                   <button
@@ -1842,27 +2774,25 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
                     className="px-4 py-2.5 rounded-xl bg-stone-800 hover:bg-stone-900 text-amber-300 font-bold text-xs flex items-center gap-2 shadow-xs transition cursor-pointer hover:scale-102 disabled:opacity-50"
                   >
                     <RefreshCw className={`w-3.5 h-3.5 ${isSyncingSheet ? 'animate-spin' : ''}`} />
-                    <span>
-                      {isSyncingSheet ? 'सिंक हो रहा है...' : `🔄 सभी ${donations.length} दान सिंक करें`}
-                    </span>
+                    <span>{isSyncingSheet ? 'सिंक हो रहा है...' : `🔄 सभी ${donations.length} दान भेजें`}</span>
                   </button>
                 </div>
               </div>
             </div>
 
-            {/* Card 3: Exact 10 Columns Schema Mapping (A to J) */}
+            {/* SECTION 3: Exact 12 Columns Schema Mapping (A to L) */}
             <div className="bg-stone-50 rounded-2xl p-5 border border-stone-200 space-y-3">
               <div className="flex items-center justify-between">
                 <div>
                   <h3 className="text-sm font-bold text-stone-900 font-heading">
-                    Google Sheet कॉलम संरचना (Columns A to J)
+                    Google Sheet कॉलम संरचना (Columns A to L)
                   </h3>
                   <p className="text-xs text-stone-500">
-                    Google Sheet में प्रत्येक दान निम्नलिखित 10 कॉलमों में बिल्कुल सही क्रम में दर्ज होता है:
+                    Google Sheet में प्रत्येक दान निम्नलिखित 12 कॉलमों में बिल्कुल सही क्रम में दर्ज होता है:
                   </p>
                 </div>
                 <span className="text-xs font-bold text-stone-600 bg-white px-2.5 py-1 rounded-lg border border-stone-200">
-                  कुल 10 कॉलम
+                  कुल 12 कॉलम
                 </span>
               </div>
 
@@ -1879,64 +2809,76 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
                   <tbody className="divide-y divide-stone-200 font-sans">
                     <tr className="hover:bg-white">
                       <td className="py-2 px-3 font-mono font-bold text-[#7a0000]">A</td>
-                      <td className="py-2 px-3 font-bold text-stone-900">Receipt No</td>
+                      <td className="py-2 px-3 font-bold text-stone-900">रसीद संख्या (Receipt No)</td>
                       <td className="py-2 px-3 text-stone-600">अनूठी रसीद संख्या</td>
                       <td className="py-2 px-3 font-mono text-stone-800">MJS-2026-1001</td>
                     </tr>
                     <tr className="hover:bg-white">
                       <td className="py-2 px-3 font-mono font-bold text-[#7a0000]">B</td>
-                      <td className="py-2 px-3 font-bold text-stone-900">Date</td>
+                      <td className="py-2 px-3 font-bold text-stone-900">दिनांक (Date)</td>
                       <td className="py-2 px-3 text-stone-600">दान प्राप्ति का दिनांक</td>
-                      <td className="py-2 px-3 font-mono text-stone-800">2026-09-22</td>
+                      <td className="py-2 px-3 font-mono text-stone-800">2026-09-23</td>
                     </tr>
                     <tr className="hover:bg-white">
                       <td className="py-2 px-3 font-mono font-bold text-[#7a0000]">C</td>
-                      <td className="py-2 px-3 font-bold text-stone-900">Name</td>
+                      <td className="py-2 px-3 font-bold text-stone-900">दानदाता का नाम (Donor Name)</td>
                       <td className="py-2 px-3 text-stone-600">दानदाता भक्त का नाम</td>
                       <td className="py-2 px-3 text-stone-800">राजीव कुमार रंजन</td>
                     </tr>
                     <tr className="hover:bg-white">
                       <td className="py-2 px-3 font-mono font-bold text-[#7a0000]">D</td>
-                      <td className="py-2 px-3 font-bold text-stone-900">Mobile</td>
+                      <td className="py-2 px-3 font-bold text-stone-900">मोबाइल नंबर (Mobile)</td>
                       <td className="py-2 px-3 text-stone-600">भक्त का 10 अंकों का मोबाइल</td>
                       <td className="py-2 px-3 font-mono text-stone-800">9709168876</td>
                     </tr>
                     <tr className="hover:bg-white">
                       <td className="py-2 px-3 font-mono font-bold text-[#7a0000]">E</td>
-                      <td className="py-2 px-3 font-bold text-stone-900">Gotra</td>
+                      <td className="py-2 px-3 font-bold text-stone-900">गोत्र (Gotra)</td>
                       <td className="py-2 px-3 text-stone-600">भक्त का पावन गोत्र</td>
                       <td className="py-2 px-3 text-stone-800">शांडिल्य / कश्यप</td>
                     </tr>
                     <tr className="hover:bg-white">
                       <td className="py-2 px-3 font-mono font-bold text-[#7a0000]">F</td>
-                      <td className="py-2 px-3 font-bold text-stone-900">Amount</td>
+                      <td className="py-2 px-3 font-bold text-stone-900">दान राशि ₹ (Amount)</td>
                       <td className="py-2 px-3 text-stone-600">दान राशि (₹)</td>
                       <td className="py-2 px-3 font-mono font-bold text-emerald-700">₹2,100</td>
                     </tr>
                     <tr className="hover:bg-white">
                       <td className="py-2 px-3 font-mono font-bold text-[#7a0000]">G</td>
-                      <td className="py-2 px-3 font-bold text-stone-900">Payment Mode</td>
+                      <td className="py-2 px-3 font-bold text-stone-900">भुगतान प्रकार (Payment Mode)</td>
                       <td className="py-2 px-3 text-stone-600">भुगतान माध्यम (UPI / Cash)</td>
-                      <td className="py-2 px-3 font-semibold text-blue-700">UPI / Cash</td>
+                      <td className="py-2 px-3 font-semibold text-blue-700">UPI (ऑनलाइन) / Cash (नकद)</td>
                     </tr>
                     <tr className="hover:bg-white">
                       <td className="py-2 px-3 font-mono font-bold text-[#7a0000]">H</td>
-                      <td className="py-2 px-3 font-bold text-stone-900">Staff ID (Kaun laya)</td>
+                      <td className="py-2 px-3 font-bold text-stone-900">संग्रहकर्ता / Staff Name</td>
                       <td className="py-2 px-3 text-stone-600">चंदा संग्रह करने वाले सेवक/पुजारी की ID</td>
                       <td className="py-2 px-3 text-stone-800">पं. रमेश शर्मा (ramesh01)</td>
                     </tr>
                     <tr className="hover:bg-white">
                       <td className="py-2 px-3 font-mono font-bold text-[#7a0000]">I</td>
-                      <td className="py-2 px-3 font-bold text-stone-900">Status</td>
-                      <td className="py-2 px-3 text-stone-600">सत्यापन स्थिति (APPROVED / PENDING)</td>
-                      <td className="py-2 px-3 font-bold text-emerald-600">APPROVED</td>
+                      <td className="py-2 px-3 font-bold text-stone-900">सत्यापन स्थिति (Status)</td>
+                      <td className="py-2 px-3 text-stone-600">सत्यापन स्थिति (स्वीकृत / PENDING)</td>
+                      <td className="py-2 px-3 font-bold text-emerald-600">स्वीकृत (APPROVED)</td>
                     </tr>
                     <tr className="hover:bg-white">
                       <td className="py-2 px-3 font-mono font-bold text-[#7a0000]">J</td>
-                      <td className="py-2 px-3 font-bold text-stone-900">Screenshot Link</td>
-                      <td className="py-2 px-3 text-stone-600">ऑनलाइन पेमेंट स्क्रीनशॉट / रसीद लिंक</td>
+                      <td className="py-2 px-3 font-bold text-stone-900">संकल्प / प्रयोजन (Sankalp)</td>
+                      <td className="py-2 px-3 text-stone-600">दान का उद्देश्य / संकल्प</td>
+                      <td className="py-2 px-3 text-stone-800">मंदिर निर्माण एवं पावन सेवा</td>
+                    </tr>
+                    <tr className="hover:bg-white">
+                      <td className="py-2 px-3 font-mono font-bold text-[#7a0000]">K</td>
+                      <td className="py-2 px-3 font-bold text-stone-900">शहर / जिला (City)</td>
+                      <td className="py-2 px-3 text-stone-600">दानदाता का शहर या गाँव</td>
+                      <td className="py-2 px-3 text-stone-800">मथुरापुर, मुजफ्फरपुर</td>
+                    </tr>
+                    <tr className="hover:bg-white">
+                      <td className="py-2 px-3 font-mono font-bold text-[#7a0000]">L</td>
+                      <td className="py-2 px-3 font-bold text-stone-900">डिजिटल रसीद लिंक (Receipt Link)</td>
+                      <td className="py-2 px-3 text-stone-600">ऑनलाइन रसीद लिंक</td>
                       <td className="py-2 px-3 font-mono text-stone-500 truncate max-w-xs">
-                        https://maa-jagdamba-sthan-mathurapur.web.app/receipt/MJS-2026-1001
+                        https://ma-jagdamba-sthan.ai.studio/receipt/MJS-2026-1001
                       </td>
                     </tr>
                   </tbody>
@@ -1944,15 +2886,15 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
               </div>
             </div>
 
-            {/* Card 4: Free Apps Script Copy Block & 30-sec Setup Guide */}
+            {/* SECTION 4: Apps Script Code Snippet for Manual Webhook */}
             <div className="bg-stone-900 text-stone-200 rounded-2xl p-5 border border-stone-800 space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
                   <h3 className="text-sm font-bold text-amber-400 font-heading">
-                    ⚡ मुफ़्त Google Apps Script कोड (Google Sheet से ऑटो सिंक के लिए)
+                    ⚡ मुफ़्त Google Apps Script कोड (वैकल्पिक Webhook से ऑटो-डिलीट सिंक के लिए)
                   </h3>
                   <p className="text-xs text-stone-400">
-                    बिना किसी सर्वर या खर्च के अपनी Google Sheet में यह कोड पेस्ट करें
+                    यदि आप Apps Script Webhook का उपयोग कर रहे हैं, तो इसमें डिलीट एवं मिरर-सिंक सपोर्ट पहले से शामिल है
                   </p>
                 </div>
                 <button
@@ -2158,6 +3100,10 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
                   <span className="font-bold">रसीद:</span>{' '}
                   {deleteTargetDonation.receiptNo || 'N/A'}
                 </div>
+                <div className="pt-2 border-t border-red-200 text-[11px] font-bold text-red-700 flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-red-600 animate-pulse"></span>
+                  <span>Google Sheet ऑटो-डिलीट: पुष्टि करते ही यह Google Sheet से भी अपने-आप हट जाएगा!</span>
+                </div>
               </div>
 
               {deleteError && (
@@ -2276,15 +3222,61 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ onLogout, onViewReceipt 
                 </div>
 
                 <div>
-                  <label className="block text-xs font-bold text-stone-700 mb-1">Photo URL</label>
+                  <label className="block text-xs font-bold text-stone-700 mb-1">
+                    पहचान पत्र फोटो (ID Card Photo - बिना URL)
+                  </label>
+                  {/* Hidden file input for editing staff */}
                   <input
-                    type="url"
-                    value={editingStaff.photoUrl}
-                    onChange={(e) =>
-                      setEditingStaff({ ...editingStaff, photoUrl: e.target.value })
-                    }
-                    className="w-full px-3 py-2 rounded-xl border border-stone-300 text-xs"
+                    ref={editStaffFileInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={handleEditStaffPhotoSelect}
                   />
+
+                  <div className="flex items-center gap-3 p-2 bg-stone-50 rounded-xl border border-stone-200">
+                    {editingStaff.photoUrl ? (
+                      <div className="relative group shrink-0">
+                        <img
+                          src={editingStaff.photoUrl}
+                          alt={editingStaff.name}
+                          className="w-12 h-12 rounded-full object-cover border-2 border-[#FFD700] shadow-sm"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setEditingStaff({ ...editingStaff, photoUrl: '' })}
+                          className="absolute -top-1 -right-1 p-0.5 bg-red-600 text-white rounded-full hover:bg-red-700 shadow cursor-pointer"
+                          title="फोटो हटाएं"
+                        >
+                          <X className="w-2.5 h-2.5" />
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="w-12 h-12 rounded-full border-2 border-dashed border-amber-300 bg-white flex items-center justify-center text-amber-700 shrink-0">
+                        <Camera className="w-5 h-5" />
+                      </div>
+                    )}
+
+                    <div className="flex-1 space-y-1.5">
+                      <button
+                        type="button"
+                        onClick={() => editStaffFileInputRef.current?.click()}
+                        className="w-full px-3 py-2 rounded-xl bg-amber-50 hover:bg-amber-100 border border-amber-300 text-[#7a0000] text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer transition shadow-xs active:scale-98"
+                      >
+                        <Camera className="w-3.5 h-3.5 text-[#7a0000]" />
+                        <span>📷 सीधे डिवाइस से नई फोटो चुनें</span>
+                      </button>
+                      <input
+                        type="text"
+                        placeholder="या फोटो URL दर्ज करें (वैकल्पिक)"
+                        value={editingStaff.photoUrl}
+                        onChange={(e) =>
+                          setEditingStaff({ ...editingStaff, photoUrl: e.target.value })
+                        }
+                        className="w-full px-2.5 py-1.5 rounded-lg border border-stone-200 text-[11px] text-stone-600 outline-hidden focus:ring-1 focus:ring-blue-500"
+                      />
+                    </div>
+                  </div>
                 </div>
 
                 <div className="flex justify-end gap-2 pt-2">

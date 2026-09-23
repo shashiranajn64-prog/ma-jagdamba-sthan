@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { templeStore } from './services/store';
-import { TempleConfig, Donation, Staff, Notice } from './types';
+import { TempleConfig, Donation, Staff, Notice, CalendarItem } from './types';
 import { Header } from './components/Header';
 import { Ticker } from './components/Ticker';
 import { HeroBanner } from './components/HeroBanner';
@@ -21,6 +21,8 @@ export function App() {
   const [config, setConfig] = useState<TempleConfig>(templeStore.getConfig());
   const [donations, setDonations] = useState<Donation[]>(templeStore.getDonations());
   const [notices, setNotices] = useState<Notice[]>(templeStore.getNotices());
+  const [calendar, setCalendar] = useState<CalendarItem[]>(templeStore.getCalendar());
+  const [, setAppVersion] = useState(0);
 
   // Navigation State
   const [currentView, setCurrentView] = useState<
@@ -42,17 +44,29 @@ export function App() {
   const [isAdminLoggedIn, setIsAdminLoggedIn] = useState<boolean>(false);
   const [currentStaffUser, setCurrentStaffUser] = useState<Staff | null>(null);
 
-  // Keep state updated on changes
+  // Keep state updated on changes instantly across all components & tabs
   useEffect(() => {
-    const unsub = templeStore.subscribe(() => {
+    const syncAll = () => {
       setConfig(templeStore.getConfig());
       setDonations(templeStore.getDonations());
       setNotices(templeStore.getNotices());
-    });
+      setCalendar(templeStore.getCalendar());
+      setAppVersion((v) => v + 1);
+    };
+
+    const unsub = templeStore.subscribe(syncAll);
+
+    const handleCustomStoreEvent = () => syncAll();
+    window.addEventListener('mjs_store_change', handleCustomStoreEvent);
+
     // Clear any residual auth on initial load for maximum security
     localStorage.removeItem('mjs_admin_auth');
     localStorage.removeItem('mjs_staff_user');
-    return unsub;
+
+    return () => {
+      unsub();
+      window.removeEventListener('mjs_store_change', handleCustomStoreEvent);
+    };
   }, []);
 
   // Handle Initial Route Mount (Receipt or Staff Verification)
@@ -317,7 +331,7 @@ export function App() {
             <HomeTwoColumns
               config={config}
               notices={notices}
-              calendar={templeStore.getCalendar()}
+              calendar={calendar}
               onNavigateToDonation={() => handleNavigation('donation')}
               onNavigateToGallery={() => handleNavigation('gallery')}
               onOpenNoticeModal={() => setIsNoticeModalOpen(true)}
