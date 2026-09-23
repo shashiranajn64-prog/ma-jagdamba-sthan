@@ -1,0 +1,77 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Reusable validation helpers
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Donations collection
+    match /donations/{donationId} {
+      allow get: if isValidId(donationId);
+      allow list: if true;
+      allow create: if isValidId(donationId) 
+        && incoming().name is string && incoming().name.size() > 0 && incoming().name.size() <= 100
+        && incoming().amount is number && incoming().amount > 0
+        && incoming().type in ['ONLINE', 'CASH']
+        && incoming().status in ['PENDING', 'APPROVED', 'REJECTED'];
+      allow update: if isValidId(donationId);
+      allow delete: if isValidId(donationId);
+    }
+
+    // Temple Configuration
+    match /config/{configId} {
+      allow get: if isValidId(configId);
+      allow list: if true;
+      allow write: if isValidId(configId);
+    }
+
+    // Staff records
+    match /staff/{staffId} {
+      allow get: if isValidId(staffId);
+      allow list: if true;
+      allow write: if isValidId(staffId);
+    }
+
+    // Notices
+    match /notices/{noticeId} {
+      allow get: if isValidId(noticeId);
+      allow list: if true;
+      allow write: if isValidId(noticeId);
+    }
+
+    // Calendar
+    match /calendar/{calendarId} {
+      allow get: if isValidId(calendarId);
+      allow list: if true;
+      allow write: if isValidId(calendarId);
+    }
+
+    // Audit logs
+    match /logs/{logId} {
+      allow get: if isValidId(logId);
+      allow list: if true;
+      allow write: if isValidId(logId);
+    }
+
+    // Health test collection
+    match /test/{testId} {
+      allow get: if isValidId(testId);
+      allow list: if true;
+      allow write: if isValidId(testId);
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

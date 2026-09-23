@@ -1,5 +1,22 @@
 import { Donation, Staff, Notice, CalendarItem, TempleConfig, AdminLog } from '../types';
 import { syncDonationToGoogleSheet, triggerAutoSyncIfConnected, formatDonationForSheet } from './googleSheetSync';
+import {
+  subscribeToDonations,
+  subscribeToConfig,
+  subscribeToStaff,
+  subscribeToNotices,
+  subscribeToCalendar,
+  cloudSaveDonation,
+  cloudDeleteDonation,
+  cloudSaveConfig,
+  cloudSaveStaff,
+  cloudDeleteStaff,
+  cloudSaveNotice,
+  cloudDeleteNotice,
+  cloudSaveCalendar,
+  cloudDeleteCalendar,
+  seedCloudDatabaseIfEmpty,
+} from './firebase';
 
 // Storage keys
 const STORAGE_KEYS = {
@@ -375,6 +392,57 @@ class TempleStore {
           this.notifyLocal();
         }
       });
+
+      // Connect to Firestore real-time cloud sync across all phones and devices
+      try {
+        subscribeToDonations((cloudDonations) => {
+          if (cloudDonations && cloudDonations.length > 0) {
+            localStorage.setItem(STORAGE_KEYS.DONATIONS, JSON.stringify(cloudDonations));
+            this.notifyLocal();
+          }
+        });
+
+        subscribeToConfig((cloudConfig) => {
+          if (cloudConfig) {
+            const local = this.getConfig();
+            const merged = { ...local, ...cloudConfig };
+            localStorage.setItem(STORAGE_KEYS.CONFIG, JSON.stringify(merged));
+            this.notifyLocal();
+          }
+        });
+
+        subscribeToStaff((cloudStaff) => {
+          if (cloudStaff && cloudStaff.length > 0) {
+            localStorage.setItem(STORAGE_KEYS.STAFF, JSON.stringify(cloudStaff));
+            this.notifyLocal();
+          }
+        });
+
+        subscribeToNotices((cloudNotices) => {
+          if (cloudNotices && cloudNotices.length > 0) {
+            localStorage.setItem(STORAGE_KEYS.NOTICES, JSON.stringify(cloudNotices));
+            this.notifyLocal();
+          }
+        });
+
+        subscribeToCalendar((cloudCalendar) => {
+          if (cloudCalendar && cloudCalendar.length > 0) {
+            localStorage.setItem(STORAGE_KEYS.CALENDAR, JSON.stringify(cloudCalendar));
+            this.notifyLocal();
+          }
+        });
+
+        // Seed cloud with initial data if newly deployed
+        seedCloudDatabaseIfEmpty({
+          donations: this.getDonations(),
+          config: this.getConfig(),
+          staff: this.getStaffList(),
+          notices: this.getNotices(),
+          calendar: this.getCalendar(),
+        });
+      } catch (cloudErr) {
+        console.warn('Firestore cloud sync connection warning:', cloudErr);
+      }
     }
   }
 
@@ -467,6 +535,7 @@ class TempleStore {
     const current = this.getConfig();
     const updated = { ...current, ...updates };
     localStorage.setItem(STORAGE_KEYS.CONFIG, JSON.stringify(updated));
+    cloudSaveConfig(updated);
     this.logAction('CONFIG_UPDATE', `मंदिर कॉन्फ़िगरेशन अपडेट किया गया (${Object.keys(updates).join(', ')})`);
     this.notify();
   }
@@ -525,6 +594,7 @@ class TempleStore {
     };
     all.unshift(newDonation);
     localStorage.setItem(STORAGE_KEYS.DONATIONS, JSON.stringify(all));
+    cloudSaveDonation(newDonation);
     this.notify();
     try {
       syncDonationToGoogleSheet(newDonation, this.getConfig());
@@ -565,6 +635,7 @@ class TempleStore {
     };
     all[index] = updated;
     localStorage.setItem(STORAGE_KEYS.DONATIONS, JSON.stringify(all));
+    cloudSaveDonation(updated);
 
     this.logAction('APPROVE_DONATION', `दान रसीद ${receiptNo} स्वीकृत: ${d.name} (₹${d.amount})`);
 
@@ -598,6 +669,7 @@ class TempleStore {
       rejectionReason: reason || 'अमान्य अथवा स्पष्ट न दिखने वाला स्क्रीनशॉट',
     };
     localStorage.setItem(STORAGE_KEYS.DONATIONS, JSON.stringify(all));
+    cloudSaveDonation(all[index]);
     this.logAction('REJECT_DONATION', `दान अस्वीकृत: ID ${id}, नाम: ${all[index].name}, कारण: ${reason || 'अमान्य'}`);
     this.notify();
     try {
@@ -612,6 +684,7 @@ class TempleStore {
 
     all[index] = { ...all[index], ...updates };
     localStorage.setItem(STORAGE_KEYS.DONATIONS, JSON.stringify(all));
+    cloudSaveDonation(all[index]);
     this.logAction('EDIT_DONATION', `दान विवरण संशोधित: ID ${id}, नाम: ${all[index].name}`);
     this.notify();
     try {
@@ -631,6 +704,7 @@ class TempleStore {
 
     const filtered = all.filter((d) => d.id !== id);
     localStorage.setItem(STORAGE_KEYS.DONATIONS, JSON.stringify(filtered));
+    cloudDeleteDonation(id);
 
     // Delete from Google Sheet via Webhook if configured
     try {
@@ -714,6 +788,7 @@ class TempleStore {
 
     all.unshift(newDonation);
     localStorage.setItem(STORAGE_KEYS.DONATIONS, JSON.stringify(all));
+    cloudSaveDonation(newDonation);
 
     this.logAction(
       'CASH_DONATION',
@@ -784,6 +859,7 @@ class TempleStore {
 
     list.push(newStaff);
     localStorage.setItem(STORAGE_KEYS.STAFF, JSON.stringify(list));
+    cloudSaveStaff(newStaff);
     this.logAction('ADD_STAFF', `नया स्टाफ जोड़ा गया: ${newStaff.name} (ID: ${newStaff.id}, Role: ${newStaff.role})`);
     this.notify();
     return newStaff;
@@ -796,6 +872,7 @@ class TempleStore {
 
     list[index] = { ...list[index], ...updates };
     localStorage.setItem(STORAGE_KEYS.STAFF, JSON.stringify(list));
+    cloudSaveStaff(list[index]);
     this.logAction('EDIT_STAFF', `स्टाफ विवरण अपडेट किया गया: ${list[index].name} (ID: ${list[index].id})`);
     this.notify();
   }
@@ -807,6 +884,7 @@ class TempleStore {
 
     const filtered = list.filter((s) => s.id.toLowerCase() !== id.toLowerCase());
     localStorage.setItem(STORAGE_KEYS.STAFF, JSON.stringify(filtered));
+    cloudDeleteStaff(id);
     this.logAction('DELETE_STAFF', `स्टाफ हटाया गया: ${target.name} (ID: ${target.id})`);
     this.notify();
   }
@@ -888,6 +966,7 @@ class TempleStore {
     };
     list.unshift(newNotice);
     localStorage.setItem(STORAGE_KEYS.NOTICES, JSON.stringify(list));
+    cloudSaveNotice(newNotice);
     this.logAction('ADD_NOTICE', `नई सूचना जोड़ी गई: "${newNotice.title}" द्वारा ${newNotice.addedBy} (${newNotice.status})`);
     this.notify();
     return newNotice;
@@ -900,6 +979,7 @@ class TempleStore {
 
     list[index].status = 'APPROVED';
     localStorage.setItem(STORAGE_KEYS.NOTICES, JSON.stringify(list));
+    cloudSaveNotice(list[index]);
     this.logAction('APPROVE_NOTICE', `सूचना स्वीकृत की गई: "${list[index].title}"`);
     this.notify();
   }
@@ -911,6 +991,7 @@ class TempleStore {
 
     list[index] = { ...list[index], ...updates };
     localStorage.setItem(STORAGE_KEYS.NOTICES, JSON.stringify(list));
+    cloudSaveNotice(list[index]);
     this.notify();
   }
 
@@ -919,6 +1000,7 @@ class TempleStore {
     const target = list.find((n) => n.id === id);
     const filtered = list.filter((n) => n.id !== id);
     localStorage.setItem(STORAGE_KEYS.NOTICES, JSON.stringify(filtered));
+    cloudDeleteNotice(id);
     if (target) {
       this.logAction('DELETE_NOTICE', `सूचना हटाई गई: "${target.title}"`);
     }
@@ -938,6 +1020,7 @@ class TempleStore {
 
   public updateCalendar(items: CalendarItem[]) {
     localStorage.setItem(STORAGE_KEYS.CALENDAR, JSON.stringify(items));
+    items.forEach((it) => cloudSaveCalendar(it));
     this.notify();
   }
 
@@ -949,13 +1032,15 @@ class TempleStore {
     };
     list.push(newItem);
     this.updateCalendar(list);
+    cloudSaveCalendar(newItem);
     this.logAction('ADD_CALENDAR', `कैलेंडर में पर्व जोड़ा गया: ${newItem.title}`);
   }
 
   public deleteCalendarItem(id: string) {
     const list = this.getCalendar();
     const filtered = list.filter((c) => c.id !== id);
-    this.updateCalendar(filtered);
+    localStorage.setItem(STORAGE_KEYS.CALENDAR, JSON.stringify(filtered));
+    cloudDeleteCalendar(id);
     this.notify();
   }
 

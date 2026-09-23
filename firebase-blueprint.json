@@ -1,0 +1,137 @@
+{
+  "entities": {
+    "Donation": {
+      "title": "Donation",
+      "description": "Temple donation record submitted by donor or collected by staff",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique donation ID" },
+        "receiptNo": { "type": "string", "description": "Sequential receipt number (e.g. MJS-2026-1001)" },
+        "name": { "type": "string", "description": "Donor name", "maxLength": 100 },
+        "mobile": { "type": "string", "description": "Donor mobile number", "maxLength": 20 },
+        "amount": { "type": "number", "description": "Donation amount in INR" },
+        "date": { "type": "string", "description": "Date of donation (YYYY-MM-DD)" },
+        "timestamp": { "type": "number", "description": "Epoch timestamp in milliseconds" },
+        "type": { "type": "string", "enum": ["ONLINE", "CASH"], "description": "Payment mode" },
+        "screenshotUrl": { "type": "string", "description": "Payment screenshot URL or base64", "maxLength": 1000000 },
+        "receiptLink": { "type": "string", "description": "URL to digital receipt", "maxLength": 500 },
+        "status": { "type": "string", "enum": ["PENDING", "APPROVED", "REJECTED"], "description": "Verification status" },
+        "sankalp": { "type": "string", "description": "Purpose/Sankalp of donation", "maxLength": 200 },
+        "gotra": { "type": "string", "description": "Gotra of donor", "maxLength": 100 },
+        "city": { "type": "string", "description": "City or Village of donor", "maxLength": 100 }
+      },
+      "required": ["id", "name", "amount", "date", "timestamp", "type", "status"]
+    },
+    "TempleConfig": {
+      "title": "TempleConfig",
+      "description": "Temple general settings, UPI IDs, gallery photos, and contact info",
+      "type": "object",
+      "properties": {
+        "upiId": { "type": "string" },
+        "qrImageUrl": { "type": "string" },
+        "phone": { "type": "string" },
+        "email": { "type": "string" },
+        "website": { "type": "string" },
+        "address": { "type": "string" },
+        "adminId": { "type": "string" },
+        "adminPassword": { "type": "string" },
+        "aboutText": { "type": "string" },
+        "historyText": { "type": "string" },
+        "aartiMorning": { "type": "string" },
+        "aartiEvening": { "type": "string" },
+        "darshanTimings": { "type": "string" },
+        "googleSheetUrl": { "type": "string" },
+        "googleSheetWebhookUrl": { "type": "string" },
+        "autoSyncToSheet": { "type": "boolean" },
+        "heroBadge": { "type": "string" },
+        "heroTitle": { "type": "string" },
+        "heroSubtitle": { "type": "string" },
+        "heroShloka": { "type": "string" },
+        "heroImageUrl": { "type": "string" },
+        "heroImageCaption": { "type": "string" },
+        "heroImageSubCaption": { "type": "string" },
+        "dailyQuote": { "type": "string" }
+      }
+    },
+    "StaffMember": {
+      "title": "StaffMember",
+      "description": "Temple authorized staff collector",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "mobile": { "type": "string" },
+        "role": { "type": "string" },
+        "password": { "type": "string" },
+        "photoUrl": { "type": "string" },
+        "joinDate": { "type": "string" },
+        "active": { "type": "boolean" }
+      },
+      "required": ["id", "name", "mobile", "role", "active"]
+    },
+    "Notice": {
+      "title": "Notice",
+      "description": "Temple notice board item",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "content": { "type": "string" },
+        "date": { "type": "string" },
+        "active": { "type": "boolean" }
+      },
+      "required": ["id", "title", "content", "date", "active"]
+    },
+    "CalendarEvent": {
+      "title": "CalendarEvent",
+      "description": "Temple festival or event",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "date": { "type": "string" },
+        "description": { "type": "string" }
+      },
+      "required": ["id", "title", "date"]
+    },
+    "AdminLog": {
+      "title": "AdminLog",
+      "description": "Audit trail log of admin operations",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "timestamp": { "type": "number" },
+        "action": { "type": "string" },
+        "details": { "type": "string" },
+        "performedBy": { "type": "string" }
+      },
+      "required": ["id", "timestamp", "action", "details"]
+    }
+  },
+  "firestore": {
+    "/donations/{donationId}": {
+      "schema": "Donation",
+      "description": "Temple donation records"
+    },
+    "/config/{configId}": {
+      "schema": "TempleConfig",
+      "description": "Temple configuration document"
+    },
+    "/staff/{staffId}": {
+      "schema": "StaffMember",
+      "description": "Temple authorized staff records"
+    },
+    "/notices/{noticeId}": {
+      "schema": "Notice",
+      "description": "Public notices and announcements"
+    },
+    "/calendar/{calendarId}": {
+      "schema": "CalendarEvent",
+      "description": "Temple calendar and festival events"
+    },
+    "/logs/{logId}": {
+      "schema": "AdminLog",
+      "description": "Audit log records"
+    }
+  }
+}
